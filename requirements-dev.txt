@@ -1,0 +1,130 @@
+# ==================== DEVELOPMENT REQUIREMENTS ====================
+# Install with: pip install -r requirements-dev.txt
+
+# Include main requirements
+-r requirements.txt
+
+# ==================== TESTING FRAMEWORK ====================
+pytest==7.4.3
+pytest-asyncio==0.21.1
+pytest-cov==4.1.0
+pytest-mock==3.12.0
+pytest-xdist==3.5.0  # Parallel testing
+pytest-benchmark==4.0.0  # Performance testing
+pytest-html==4.1.1  # HTML test reports
+pytest-json-report==1.5.0  # JSON test reports
+factory-boy==3.3.0  # Test data factories
+
+# ==================== CODE QUALITY & FORMATTING ====================
+black==23.11.0
+isort==5.12.0
+flake8==6.1.0
+mypy==1.7.1
+pre-commit==3.6.0
+bandit==1.7.5  # Security linting
+safety==2.3.5  # Dependency vulnerability scanner
+
+# ==================== CODE ANALYSIS ====================
+pylint==3.0.3
+flake8-docstrings==1.7.0
+flake8-import-order==0.18.2
+flake8-bugbear==23.12.2
+autopep8==2.0.4
+
+# ==================== TYPE CHECKING ====================
+mypy==1.7.1
+types-redis==4.6.0.11
+types-requests==2.31.0.10
+types-python-dateutil==2.8.19.14
+
+# ==================== DOCUMENTATION ====================
+sphinx==7.2.6
+sphinx-rtd-theme==2.0.0
+sphinxcontrib-openapi==0.8.1
+mkdocs==1.5.3
+mkdocs-material==9.4.14
+
+# ==================== DEVELOPMENT TOOLS ====================
+ipython==8.18.1
+jupyter==1.0.0
+notebook==7.0.6
+ipdb==0.13.13  # Interactive debugger
+rich==13.7.0  # Rich terminal output
+click==8.1.7  # CLI development
+
+# ==================== PERFORMANCE PROFILING ====================
+py-spy==0.3.14
+memory-profiler==0.61.0
+line-profiler==4.1.1
+django-debug-toolbar==4.2.0  # For API debugging
+
+# ==================== DATABASE DEVELOPMENT ====================
+pgcli==4.0.1  # PostgreSQL CLI with autocomplete
+faker==20.1.0  # Generate fake data for testing
+
+# ==================== API TESTING ====================
+httpx==0.25.2  # Already in main requirements but needed for testing
+requests-mock==1.11.0
+responses==0.24.1
+
+# ==================== MONITORING DEVELOPMENT ====================
+locust==2.17.0  # Load testing
+prometheus-client==0.19.0  # Already in main requirements
+
+# ==================== DEVELOPMENT SERVERS ====================
+watchdog==3.0.0  # File watching for auto-reload
+pytest-watch==4.2.0
+
+# ==================== ENVIRONMENT MANAGEMENT ====================
+python-dotenv==1.0.0  # Already in main requirements
+environs==11.0.0  # Alternative env management
+
+# ==================== DEBUGGING & LOGGING ====================
+icecream==2.1.3  # Better print debugging
+colorama==0.4.6  # Colored terminal output
+
+# ==================== SECURITY TESTING ====================
+bandit[toml]==1.7.5
+semgrep==1.45.0
+
+# ==================== DEPENDENCY MANAGEMENT ====================
+pip-tools==7.3.0
+pipenv==2023.11.15
+poetry==1.7.1
+
+# ==================== MOCK & FIXTURES ====================
+freezegun==1.2.2  # Mock time/date
+responses==0.24.1  # Mock HTTP responses
+pytest-freezegun==0.4.2
+
+# ==================== DATABASE TESTING ====================
+pytest-postgresql==5.0.0
+sqlalchemy-utils==0.41.1
+
+# ==================== COVERAGE REPORTING ====================
+coverage[toml]==7.3.2
+codecov==2.1.13
+
+# ==================== LINTING PLUGINS ====================
+flake8-comprehensions==3.14.0
+flake8-simplify==0.21.0
+flake8-annotations==3.0.1
+flake8-cognitive-complexity==0.1.0
+
+# ==================== JUPYTER EXTENSIONS ====================
+jupyterlab==4.0.9
+jupyterlab-code-formatter==2.2.1
+
+# ==================== GIT HOOKS ====================
+pre-commit==3.6.0  # Already listed above
+
+# ==================== CONTAINER DEVELOPMENT ====================
+docker-compose==1.29.2
+
+# ==================== API DOCUMENTATION TOOLS ====================
+redoc-cli==0.13.21
+swagger-codegen-cli==3.0.46
+
+# ==================== DEVELOPMENT UTILITIES ====================
+python-json-logger==2.0.7  # Already in main requirements
+structlog==23.2.0  # Already in main requirements

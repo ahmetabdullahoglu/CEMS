@@ -1,0 +1,147 @@
+# ==================== CORE FRAMEWORK ====================
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+pydantic[email]==2.5.0
+pydantic-settings==2.1.0
+
+# ==================== DATABASE ====================
+sqlalchemy==2.0.23
+asyncpg==0.29.0
+alembic==1.13.1
+psycopg2-binary==2.9.9
+
+# ==================== AUTHENTICATION & SECURITY ====================
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+python-multipart==0.0.6
+bcrypt==4.1.2
+
+# ==================== CACHING & SESSION ====================
+redis==5.0.1
+aioredis==2.0.1
+
+# ==================== HTTP CLIENT ====================
+httpx==0.25.2
+aiohttp==3.9.1
+
+# ==================== VALIDATION & SERIALIZATION ====================
+email-validator==2.1.0
+phonenumbers==8.13.26
+
+# ==================== DATE & TIME ====================
+python-dateutil==2.8.2
+pytz==2023.3
+
+# ==================== FILE HANDLING ====================
+openpyxl==3.1.2
+pandas==2.1.4
+xlsxwriter==3.1.9
+python-docx==1.1.0
+PyPDF2==3.0.1
+pillow==10.1.0
+
+# ==================== ENVIRONMENT & CONFIG ====================
+python-dotenv==1.0.0
+
+# ==================== LOGGING & MONITORING ====================
+structlog==23.2.0
+colorlog==6.8.0
+
+# ==================== API DOCUMENTATION ====================
+# FastAPI includes Swagger/OpenAPI support automatically
+
+# ==================== TESTING ====================
+pytest==7.4.3
+pytest-asyncio==0.21.1
+pytest-cov==4.1.0
+pytest-mock==3.12.0
+httpx==0.25.2  # For testing FastAPI endpoints
+
+# ==================== CODE QUALITY ====================
+black==23.11.0
+isort==5.12.0
+flake8==6.1.0
+mypy==1.7.1
+
+# ==================== DEVELOPMENT TOOLS ====================
+pre-commit==3.6.0
+pytest-watch==4.2.0
+
+# ==================== BACKGROUND TASKS ====================
+celery[redis]==5.3.4
+kombu==5.3.4
+
+# ==================== EMAIL ====================
+fastapi-mail==1.4.1
+jinja2==3.1.2
+
+# ==================== WEBSOCKETS (for real-time features) ====================
+websockets==12.0
+
+# ==================== RATE LIMITING ====================
+slowapi==0.1.9
+
+# ==================== MIDDLEWARE ====================
+python-json-logger==2.0.7
+
+# ==================== CURRENCY & FINANCE ====================
+forex-python==1.8
+yfinance==0.2.28  # For exchange rates from financial APIs
+
+# ==================== UTILITIES ====================
+python-slugify==8.0.1
+qrcode[pil]==7.4.2
+barcode==1.3.1
+
+# ==================== DEPLOYMENT ====================
+gunicorn==21.2.0
+
+# ==================== MONITORING (Optional) ====================
+prometheus-client==0.19.0
+psutil==5.9.6
+
+# ==================== AWS SDK (if using AWS services) ====================
+boto3==1.34.0
+botocore==1.34.0
+
+# ==================== ADDITIONAL SECURITY ====================
+cryptography==41.0.8
+
+# ==================== JSON & API ====================
+orjson==3.9.10  # Faster JSON serialization
+
+# ==================== INTERNATIONALIZATION ====================
+babel==2.13.1
+
+# ==================== BACKUP & EXPORT ====================
+schedule==1.2.0
+
+# ==================== DATABASE MIGRATIONS ====================
+# Alembic is already included above
+
+# ==================== TIMEZONE HANDLING ====================
+# python-dateutil and pytz already included above
+
+# ==================== DECIMAL PRECISION ====================
+decimal==1.70  # For precise financial calculations
+
+# ==================== UUID GENERATION ====================
+# Built-in uuid module is sufficient
+
+# ==================== HASHING & ENCODING ====================
+# passlib and bcrypt already included above
+
+# ==================== REGEX & STRING PROCESSING ====================
+# Built-in re module is sufficient
+
+# ==================== CONFIGURATION VALIDATION ====================
+# Pydantic already handles this
+
+# ==================== ASYNC UTILITIES ====================
+asyncio-throttle==1.0.2
+
+# ==================== FINANCIAL CALCULATIONS ====================
+quantlib==1.32  # Advanced financial calculations (optional)
+
+# ==================== DEVELOPMENT REQUIREMENTS ====================
+# Create requirements-dev.txt for development-only dependencies
