@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import List, Optional
 from sqlalchemy import (
     Column, String, Boolean, DateTime, Text, ForeignKey, 
-    UniqueConstraint, Index, CheckConstraint, func
+    UniqueConstraint, Index, CheckConstraint, func, Integer
 )
 from sqlalchemy.orm import relationship, validates
 from sqlalchemy.ext.hybrid import hybrid_property
@@ -79,11 +79,10 @@ class Role(BaseModelWithSoftDelete):
     )
     
     # Relationships
-    users = relationship(
-        "User",
-        secondary="user_roles",
-        back_populates="roles",
-        lazy="dynamic"
+    user_roles = relationship(
+        "UserRole",
+        back_populates="role",
+        cascade="all, delete-orphan"
     )
     
     # Table constraints
@@ -243,9 +242,10 @@ class User(BaseModelWithSoftDelete):
         comment="User's preferred timezone"
     )
     
-    # Branch assignment (foreign key to be added when Branch model is created)
+    # Branch assignment (Fixed Foreign Key)
     branch_id = Column(
-        Integer,  # Will be ForeignKey('branches.id') when Branch model exists
+        Integer,
+        ForeignKey('branches.id'),
         nullable=True,
         index=True,
         comment="ID of the branch user is assigned to"
@@ -292,12 +292,31 @@ class User(BaseModelWithSoftDelete):
         comment="When password reset was requested"
     )
     
-    # Relationships
-    roles = relationship(
-        "Role",
-        secondary="user_roles",
+    # Relationships (Fixed)
+    branch = relationship(
+        "Branch",
         back_populates="users",
-        lazy="select"
+        foreign_keys=[branch_id]
+    )
+    
+    user_roles = relationship(
+        "UserRole",
+        back_populates="user",
+        cascade="all, delete-orphan"
+    )
+    
+    # Processed transactions
+    processed_transactions = relationship(
+        "Transaction",
+        foreign_keys="Transaction.user_id",
+        back_populates="user"
+    )
+    
+    # Approved transactions
+    approved_transactions = relationship(
+        "Transaction",
+        foreign_keys="Transaction.approved_by",
+        back_populates="approver"
     )
     
     # Table constraints and indexes
@@ -392,7 +411,7 @@ class User(BaseModelWithSoftDelete):
         Returns:
             bool: True if user has the role
         """
-        return any(role.name == role_name for role in self.roles)
+        return any(ur.role.name == role_name and ur.is_active for ur in self.user_roles)
     
     def has_permission(self, permission: str) -> bool:
         """
@@ -407,9 +426,15 @@ class User(BaseModelWithSoftDelete):
         if self.is_superuser:
             return True
         
-        for role in self.roles:
-            if role.permissions and permission in role.permissions:
-                return True
+        for user_role in self.user_roles:
+            if user_role.is_active and user_role.role.permissions:
+                import json
+                try:
+                    permissions = json.loads(user_role.role.permissions)
+                    if permission in permissions or "*" in permissions:
+                        return True
+                except json.JSONDecodeError:
+                    continue
         
         return False
     
@@ -420,8 +445,13 @@ class User(BaseModelWithSoftDelete):
         Args:
             role: Role to add
         """
-        if role not in self.roles:
-            self.roles.append(role)
+        # Check if user already has this role
+        existing_role = next((ur for ur in self.user_roles if ur.role_id == role.id), None)
+        if existing_role:
+            existing_role.is_active = True
+        else:
+            user_role = UserRole(user_id=self.id, role_id=role.id, is_active=True)
+            self.user_roles.append(user_role)
     
     def remove_role(self, role: Role) -> None:
         """
@@ -430,8 +460,9 @@ class User(BaseModelWithSoftDelete):
         Args:
             role: Role to remove
         """
-        if role in self.roles:
-            self.roles.remove(role)
+        for user_role in self.user_roles:
+            if user_role.role_id == role.id:
+                user_role.is_active = False
     
     def lock_account(self, duration_minutes: int = 15) -> None:
         """
@@ -480,16 +511,18 @@ class UserRole(BaseModelWithSoftDelete):
     
     __tablename__ = "user_roles"
     
-    # Foreign keys
+    # Foreign keys (Fixed)
     user_id = Column(
-        Integer,  # ForeignKey('users.id')
+        Integer,
+        ForeignKey('users.id'),
         nullable=False,
         index=True,
         comment="Reference to user"
     )
     
     role_id = Column(
-        Integer,  # ForeignKey('roles.id')
+        Integer,
+        ForeignKey('roles.id'),
         nullable=False,
         index=True,
         comment="Reference to role"
@@ -498,6 +531,7 @@ class UserRole(BaseModelWithSoftDelete):
     # Assignment metadata
     assigned_by = Column(
         Integer,
+        ForeignKey('users.id'),
         nullable=True,
         comment="ID of user who assigned this role"
     )
@@ -521,6 +555,24 @@ class UserRole(BaseModelWithSoftDelete):
         default=True,
         server_default='true',
         comment="Whether this role assignment is active"
+    )
+    
+    # Relationships (Fixed)
+    user = relationship(
+        "User",
+        foreign_keys=[user_id],
+        back_populates="user_roles"
+    )
+    
+    role = relationship(
+        "Role",
+        foreign_keys=[role_id],
+        back_populates="user_roles"
+    )
+    
+    assigner = relationship(
+        "User",
+        foreign_keys=[assigned_by]
     )
     
     # Table constraints

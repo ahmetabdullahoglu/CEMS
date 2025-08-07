@@ -1,4 +1,4 @@
-"""Add branches, customers, transactions, and vault tables
+"""Add customers and branch balances tables
 
 Revision ID: 002
 Revises: 001
@@ -17,69 +17,9 @@ depends_on = None
 
 
 def upgrade() -> None:
-    """Create branches, customers, transactions, and vault tables."""
+    """Create customers and branch balances tables with proper foreign keys."""
     
-    # Create branches table
-    op.create_table(
-        'branches',
-        sa.Column('id', sa.Integer(), autoincrement=True, nullable=False, comment='Primary key'),
-        sa.Column('created_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False, comment='Record creation timestamp'),
-        sa.Column('updated_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False, comment='Record last update timestamp'),
-        sa.Column('is_deleted', sa.Boolean(), server_default='false', nullable=False, comment='Soft delete flag'),
-        sa.Column('deleted_at', sa.DateTime(), nullable=True, comment='Soft delete timestamp'),
-        sa.Column('created_by', sa.Integer(), nullable=True, comment='User ID who created this record'),
-        sa.Column('updated_by', sa.Integer(), nullable=True, comment='User ID who last updated this record'),
-        sa.Column('branch_code', sa.String(length=10), nullable=False, comment='Unique branch code (e.g., BR001, BR002)'),
-        sa.Column('name', sa.String(length=100), nullable=False, comment='Branch display name'),
-        sa.Column('name_arabic', sa.String(length=100), nullable=True, comment='Branch name in Arabic'),
-        sa.Column('address_line1', sa.String(length=200), nullable=False, comment='Primary address line'),
-        sa.Column('address_line2', sa.String(length=200), nullable=True, comment='Secondary address line'),
-        sa.Column('city', sa.String(length=100), nullable=False, comment='City name'),
-        sa.Column('state_province', sa.String(length=100), nullable=True, comment='State or province'),
-        sa.Column('postal_code', sa.String(length=20), nullable=True, comment='Postal/ZIP code'),
-        sa.Column('country_code', sa.String(length=3), nullable=False, server_default='SAU', comment='ISO 3166 country code'),
-        sa.Column('latitude', sa.Numeric(precision=10, scale=8), nullable=True, comment='Latitude coordinate'),
-        sa.Column('longitude', sa.Numeric(precision=11, scale=8), nullable=True, comment='Longitude coordinate'),
-        sa.Column('phone_number', sa.String(length=20), nullable=True, comment='Primary phone number'),
-        sa.Column('fax_number', sa.String(length=20), nullable=True, comment='Fax number'),
-        sa.Column('email', sa.String(length=255), nullable=True, comment='Branch email address'),
-        sa.Column('branch_type', sa.String(length=20), nullable=False, server_default='standard', comment='Type of branch (main, standard, kiosk)'),
-        sa.Column('status', sa.String(length=20), nullable=False, server_default='active', comment='Branch operational status'),
-        sa.Column('is_main_branch', sa.Boolean(), server_default='false', nullable=False, comment='Whether this is the main/headquarters branch'),
-        sa.Column('is_24_hours', sa.Boolean(), server_default='false', nullable=False, comment='Whether branch operates 24/7'),
-        sa.Column('opening_time', sa.Time(), nullable=True, comment='Daily opening time'),
-        sa.Column('closing_time', sa.Time(), nullable=True, comment='Daily closing time'),
-        sa.Column('weekend_days', sa.String(length=20), nullable=False, server_default='friday,saturday', comment='Comma-separated weekend days'),
-        sa.Column('operates_on_weekends', sa.Boolean(), server_default='false', nullable=False, comment='Whether branch operates on weekends'),
-        sa.Column('operates_on_holidays', sa.Boolean(), server_default='false', nullable=False, comment='Whether branch operates on public holidays'),
-        sa.Column('daily_transaction_limit', sa.Numeric(precision=15, scale=2), nullable=True, comment='Daily transaction limit for this branch'),
-        sa.Column('single_transaction_limit', sa.Numeric(precision=15, scale=2), nullable=True, comment='Single transaction limit for this branch'),
-        sa.Column('requires_manager_approval', sa.Boolean(), server_default='false', nullable=False, comment='Whether large transactions require manager approval'),
-        sa.Column('manager_approval_threshold', sa.Numeric(precision=15, scale=2), nullable=True, comment='Amount threshold requiring manager approval'),
-        sa.Column('has_vault', sa.Boolean(), server_default='true', nullable=False, comment='Whether branch has its own vault'),
-        sa.Column('vault_capacity_usd', sa.Numeric(precision=15, scale=2), nullable=True, comment='Vault capacity in USD equivalent'),
-        sa.Column('branch_manager_id', sa.Integer(), nullable=True, comment='Branch manager user ID'),
-        sa.Column('opened_date', sa.DateTime(), nullable=True, comment='Branch opening date'),
-        sa.Column('license_number', sa.String(length=100), nullable=True, comment='Government license number'),
-        sa.Column('license_expiry_date', sa.DateTime(), nullable=True, comment='License expiry date'),
-        sa.Column('notes', sa.Text(), nullable=True, comment='Additional branch information'),
-        sa.CheckConstraint("branch_type IN ('main', 'standard', 'kiosk', 'mobile')", name='valid_branch_type'),
-        sa.CheckConstraint("status IN ('active', 'inactive', 'maintenance', 'closed')", name='valid_branch_status'),
-        sa.CheckConstraint('daily_transaction_limit IS NULL OR daily_transaction_limit > 0', name='positive_daily_limit'),
-        sa.CheckConstraint('single_transaction_limit IS NULL OR single_transaction_limit > 0', name='positive_single_limit'),
-        sa.CheckConstraint('manager_approval_threshold IS NULL OR manager_approval_threshold > 0', name='positive_approval_threshold'),
-        sa.CheckConstraint('latitude IS NULL OR (latitude >= -90 AND latitude <= 90)', name='valid_latitude'),
-        sa.CheckConstraint('longitude IS NULL OR (longitude >= -180 AND longitude <= 180)', name='valid_longitude'),
-        sa.PrimaryKeyConstraint('id'),
-        sa.UniqueConstraint('branch_code')
-    )
-    op.create_index('idx_branch_code_status', 'branches', ['branch_code', 'status'])
-    op.create_index('idx_branch_city_status', 'branches', ['city', 'status'])
-    op.create_index('idx_branch_manager', 'branches', ['branch_manager_id'])
-    op.create_index('idx_branch_type', 'branches', ['branch_type'])
-    op.create_index(op.f('ix_branches_branch_code'), 'branches', ['branch_code'])
-
-    # Create branch_balances table
+    # Create branch_balances table (Level 3 - References branches and currencies)
     op.create_table(
         'branch_balances',
         sa.Column('id', sa.Integer(), autoincrement=True, nullable=False, comment='Primary key'),
@@ -113,6 +53,9 @@ def upgrade() -> None:
         sa.CheckConstraint('minimum_balance >= 0', name='non_negative_minimum_balance'),
         sa.CheckConstraint('maximum_balance IS NULL OR maximum_balance > minimum_balance', name='valid_maximum_balance'),
         sa.CheckConstraint('reserved_balance <= current_balance', name='reserved_not_exceed_current'),
+        sa.ForeignKeyConstraint(['branch_id'], ['branches.id'], ),
+        sa.ForeignKeyConstraint(['currency_id'], ['currencies.id'], ),
+        sa.ForeignKeyConstraint(['frozen_by'], ['users.id'], ),
         sa.PrimaryKeyConstraint('id'),
         sa.UniqueConstraint('branch_id', 'currency_code', name='unique_branch_currency')
     )
@@ -120,7 +63,7 @@ def upgrade() -> None:
     op.create_index('idx_balance_thresholds', 'branch_balances', ['minimum_balance', 'reorder_threshold', 'critical_threshold'])
     op.create_index('idx_balance_frozen', 'branch_balances', ['is_frozen', 'frozen_at'])
 
-    # Create customers table
+    # Create customers table (Level 3 - References branches and users)
     op.create_table(
         'customers',
         sa.Column('id', sa.Integer(), autoincrement=True, nullable=False, comment='Primary key'),
@@ -212,6 +155,9 @@ def upgrade() -> None:
         sa.CheckConstraint('monthly_limit IS NULL OR monthly_limit > 0', name='positive_monthly_limit'),
         sa.CheckConstraint('commission_rate IS NULL OR (commission_rate >= 0 AND commission_rate <= 1)', name='valid_commission_rate'),
         sa.CheckConstraint('aml_risk_score::integer >= 0 AND aml_risk_score::integer <= 100', name='valid_aml_risk_score'),
+        sa.ForeignKeyConstraint(['kyc_verified_by'], ['users.id'], ),
+        sa.ForeignKeyConstraint(['registered_by'], ['users.id'], ),
+        sa.ForeignKeyConstraint(['registration_branch_id'], ['branches.id'], ),
         sa.PrimaryKeyConstraint('id'),
         sa.UniqueConstraint('customer_code'),
         sa.UniqueConstraint('id_type', 'id_number', name='unique_customer_id')
@@ -226,20 +172,10 @@ def upgrade() -> None:
     op.create_index(op.f('ix_customers_customer_code'), 'customers', ['customer_code'])
     op.create_index(op.f('ix_customers_id_number'), 'customers', ['id_number'])
 
-    # Update users table to add branch_id foreign key
-    op.add_column('users', sa.Column('branch_id', sa.Integer(), nullable=True, comment='ID of the branch user is assigned to'))
-    op.create_index('idx_user_branch_id', 'users', ['branch_id'])
-
-    # Continue with remaining tables in next part due to length...
-
 
 def downgrade() -> None:
     """Drop all new tables created in upgrade."""
     
     # Drop in reverse order
-    op.drop_index('idx_user_branch_id', table_name='users')
-    op.drop_column('users', 'branch_id')
-    
     op.drop_table('customers')
     op.drop_table('branch_balances')
-    op.drop_table('branches')

@@ -269,7 +269,8 @@ class Customer(BaseModelWithSoftDelete):
     )
     
     kyc_verified_by = Column(
-        Integer,  # ForeignKey('users.id')
+        Integer,
+        ForeignKey('users.id'),
         nullable=True,
         comment="User who verified the KYC"
     )
@@ -370,7 +371,7 @@ class Customer(BaseModelWithSoftDelete):
         comment="Notification preferences (comma-separated)"
     )
     
-    # Registration and referral
+    # Registration and referral (Fixed Foreign Keys)
     registration_date = Column(
         DateTime,
         nullable=False,
@@ -379,13 +380,15 @@ class Customer(BaseModelWithSoftDelete):
     )
     
     registration_branch_id = Column(
-        Integer,  # ForeignKey('branches.id')
+        Integer,
+        ForeignKey('branches.id'),
         nullable=True,
         comment="Branch where customer was registered"
     )
     
     registered_by = Column(
-        Integer,  # ForeignKey('users.id')
+        Integer,
+        ForeignKey('users.id'),
         nullable=True,
         comment="User who registered the customer"
     )
@@ -497,16 +500,30 @@ class Customer(BaseModelWithSoftDelete):
         comment="Additional notes about the customer"
     )
     
-    # Relationships
+    # Relationships (Fixed)
     transactions = relationship(
         "Transaction",
+        foreign_keys="Transaction.customer_id",
         back_populates="customer",
         lazy="dynamic"
     )
     
     registration_branch = relationship(
         "Branch",
-        foreign_keys=[registration_branch_id]
+        foreign_keys=[registration_branch_id],
+        back_populates="customers"
+    )
+    
+    registered_by_user = relationship(
+        "User",
+        foreign_keys=[registered_by],
+        backref="registered_customers"
+    )
+    
+    kyc_verifier = relationship(
+        "User",
+        foreign_keys=[kyc_verified_by],
+        backref="verified_customers"
     )
     
     # Table constraints and indexes
@@ -556,7 +573,6 @@ class Customer(BaseModelWithSoftDelete):
             name="valid_aml_risk_score"
         ),
         UniqueConstraint('id_type', 'id_number', name='unique_customer_id'),
-        Index("idx_customer_code", customer_code),
         Index("idx_customer_mobile", mobile_number),
         Index("idx_customer_email", email),
         Index("idx_customer_status_type", status, customer_type),

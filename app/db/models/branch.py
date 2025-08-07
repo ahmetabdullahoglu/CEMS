@@ -16,7 +16,6 @@ from sqlalchemy.orm import relationship, validates
 from sqlalchemy.ext.hybrid import hybrid_property
 
 from app.db.base import BaseModelWithSoftDelete
-from app.core.constants import CurrencyCode
 
 
 class Branch(BaseModelWithSoftDelete):
@@ -228,9 +227,10 @@ class Branch(BaseModelWithSoftDelete):
         comment="Vault capacity in USD equivalent"
     )
     
-    # Administrative information
+    # Administrative information (Fixed Foreign Key)
     branch_manager_id = Column(
-        Integer,  # ForeignKey('users.id')
+        Integer,
+        ForeignKey('users.id'),
         nullable=True,
         comment="Branch manager user ID"
     )
@@ -260,7 +260,7 @@ class Branch(BaseModelWithSoftDelete):
         comment="Additional branch information"
     )
     
-    # Relationships
+    # Relationships (Fixed)
     balances = relationship(
         "BranchBalance",
         back_populates="branch",
@@ -277,6 +277,27 @@ class Branch(BaseModelWithSoftDelete):
     
     transactions = relationship(
         "Transaction",
+        foreign_keys="Transaction.branch_id",
+        back_populates="branch",
+        lazy="dynamic"
+    )
+    
+    manager = relationship(
+        "User",
+        foreign_keys=[branch_manager_id],
+        backref="managed_branches"
+    )
+    
+    customers = relationship(
+        "Customer",
+        foreign_keys="Customer.registration_branch_id",
+        back_populates="registration_branch",
+        lazy="dynamic"
+    )
+    
+    vaults = relationship(
+        "Vault",
+        foreign_keys="Vault.branch_id",
         back_populates="branch",
         lazy="dynamic"
     )
@@ -490,16 +511,18 @@ class BranchBalance(BaseModelWithSoftDelete):
     
     __tablename__ = "branch_balances"
     
-    # Branch and currency references
+    # Branch and currency references (Fixed Foreign Keys)
     branch_id = Column(
-        Integer,  # ForeignKey('branches.id')
+        Integer,
+        ForeignKey('branches.id'),
         nullable=False,
         index=True,
         comment="Reference to branch"
     )
     
     currency_id = Column(
-        Integer,  # ForeignKey('currencies.id')
+        Integer,
+        ForeignKey('currencies.id'),
         nullable=False,
         index=True,
         comment="Reference to currency"
@@ -526,12 +549,6 @@ class BranchBalance(BaseModelWithSoftDelete):
         default=Decimal('0.0000'),
         comment="Amount reserved for pending transactions"
     )
-    
-    # Calculated available amount
-    @hybrid_property
-    def available_amount(self) -> Decimal:
-        """Calculate available amount (current - reserved)."""
-        return self.current_balance - self.reserved_balance
     
     # Balance limits and thresholds
     minimum_balance = Column(
@@ -561,7 +578,8 @@ class BranchBalance(BaseModelWithSoftDelete):
     
     # Balance tracking
     last_transaction_id = Column(
-        Integer,  # ForeignKey('transactions.id')
+        Integer,
+        ForeignKey('transactions.id'),
         nullable=True,
         comment="ID of last transaction affecting this balance"
     )
@@ -616,7 +634,8 @@ class BranchBalance(BaseModelWithSoftDelete):
     )
     
     frozen_by = Column(
-        Integer,  # ForeignKey('users.id')
+        Integer,
+        ForeignKey('users.id'),
         nullable=True,
         comment="User who froze the balance"
     )
@@ -628,7 +647,7 @@ class BranchBalance(BaseModelWithSoftDelete):
         comment="Additional notes about this balance"
     )
     
-    # Relationships
+    # Relationships (Fixed)
     branch = relationship(
         "Branch",
         back_populates="balances"
@@ -636,7 +655,18 @@ class BranchBalance(BaseModelWithSoftDelete):
     
     currency = relationship(
         "Currency",
-        foreign_keys=[currency_id]
+        foreign_keys=[currency_id],
+        back_populates="branch_balances"
+    )
+    
+    last_transaction = relationship(
+        "Transaction",
+        foreign_keys=[last_transaction_id]
+    )
+    
+    freezer = relationship(
+        "User",
+        foreign_keys=[frozen_by]
     )
     
     # Table constraints and indexes
@@ -668,6 +698,11 @@ class BranchBalance(BaseModelWithSoftDelete):
     )
     
     # Hybrid properties
+    @hybrid_property
+    def available_amount(self) -> Decimal:
+        """Calculate available amount (current - reserved)."""
+        return self.current_balance - self.reserved_balance
+    
     @hybrid_property
     def is_below_minimum(self) -> bool:
         """Check if balance is below minimum threshold."""

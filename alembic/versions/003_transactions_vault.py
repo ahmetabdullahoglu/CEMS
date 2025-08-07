@@ -1,4 +1,4 @@
-"""Add transactions and vault tables
+"""Add transactions and vault tables with proper foreign keys
 
 Revision ID: 003
 Revises: 002
@@ -17,9 +17,9 @@ depends_on = None
 
 
 def upgrade() -> None:
-    """Create transactions and vault tables."""
+    """Create transactions and vault tables with proper foreign key constraints."""
     
-    # Create vaults table
+    # Create vaults table (Level 3 - References branches and users)
     op.create_table(
         'vaults',
         sa.Column('id', sa.Integer(), autoincrement=True, nullable=False, comment='Primary key'),
@@ -63,6 +63,10 @@ def upgrade() -> None:
         sa.CheckConstraint("status IN ('active', 'inactive', 'maintenance', 'emergency_locked')", name='valid_vault_status'),
         sa.CheckConstraint("security_level IN ('low', 'medium', 'high', 'maximum')", name='valid_security_level'),
         sa.CheckConstraint('audit_frequency_days > 0', name='positive_audit_frequency'),
+        sa.ForeignKeyConstraint(['branch_id'], ['branches.id'], ),
+        sa.ForeignKeyConstraint(['last_audit_by'], ['users.id'], ),
+        sa.ForeignKeyConstraint(['primary_custodian_id'], ['users.id'], ),
+        sa.ForeignKeyConstraint(['secondary_custodian_id'], ['users.id'], ),
         sa.PrimaryKeyConstraint('id'),
         sa.UniqueConstraint('vault_code')
     )
@@ -72,49 +76,7 @@ def upgrade() -> None:
     op.create_index('idx_vault_branch', 'vaults', ['branch_id'])
     op.create_index(op.f('ix_vaults_vault_code'), 'vaults', ['vault_code'])
 
-    # Create vault_balances table
-    op.create_table(
-        'vault_balances',
-        sa.Column('id', sa.Integer(), autoincrement=True, nullable=False, comment='Primary key'),
-        sa.Column('created_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False, comment='Record creation timestamp'),
-        sa.Column('updated_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False, comment='Record last update timestamp'),
-        sa.Column('is_deleted', sa.Boolean(), server_default='false', nullable=False, comment='Soft delete flag'),
-        sa.Column('deleted_at', sa.DateTime(), nullable=True, comment='Soft delete timestamp'),
-        sa.Column('created_by', sa.Integer(), nullable=True, comment='User ID who created this record'),
-        sa.Column('updated_by', sa.Integer(), nullable=True, comment='User ID who last updated this record'),
-        sa.Column('vault_id', sa.Integer(), nullable=False, comment='Reference to vault'),
-        sa.Column('currency_id', sa.Integer(), nullable=False, comment='Reference to currency'),
-        sa.Column('currency_code', sa.String(length=3), nullable=False, comment='Currency code for easier querying'),
-        sa.Column('current_balance', sa.Numeric(precision=18, scale=4), nullable=False, server_default='0.0000', comment='Current vault balance'),
-        sa.Column('reserved_balance', sa.Numeric(precision=18, scale=4), nullable=False, server_default='0.0000', comment='Reserved amount for pending operations'),
-        sa.Column('denomination_breakdown', postgresql.JSON(astext_type=sa.Text()), nullable=True, comment='Physical denomination breakdown'),
-        sa.Column('last_count_amount', sa.Numeric(precision=18, scale=4), nullable=True, comment='Last physically counted amount'),
-        sa.Column('last_count_date', sa.DateTime(), nullable=True, comment='Last physical count date'),
-        sa.Column('last_counted_by', sa.Integer(), nullable=True, comment='User who performed last count'),
-        sa.Column('count_variance', sa.Numeric(precision=18, scale=4), nullable=True, comment='Variance from last count'),
-        sa.Column('minimum_balance', sa.Numeric(precision=18, scale=4), nullable=False, server_default='0.0000', comment='Minimum balance to maintain'),
-        sa.Column('maximum_balance', sa.Numeric(precision=18, scale=4), nullable=True, comment='Maximum balance allowed'),
-        sa.Column('reorder_threshold', sa.Numeric(precision=18, scale=4), nullable=True, comment='Threshold for reorder alerts'),
-        sa.Column('critical_threshold', sa.Numeric(precision=18, scale=4), nullable=True, comment='Critical low balance threshold'),
-        sa.Column('is_active', sa.Boolean(), server_default='true', nullable=False, comment='Whether this balance is active'),
-        sa.Column('last_transaction_id', sa.Integer(), nullable=True, comment='Last transaction affecting this balance'),
-        sa.Column('last_updated_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False, comment='Last balance update timestamp'),
-        sa.Column('last_reconciliation_date', sa.DateTime(), nullable=True, comment='Last reconciliation date'),
-        sa.Column('reconciliation_variance', sa.Numeric(precision=18, scale=4), nullable=True, comment='Variance from last reconciliation'),
-        sa.Column('reconciled_by', sa.Integer(), nullable=True, comment='User who performed last reconciliation'),
-        sa.Column('notes', sa.Text(), nullable=True, comment='Additional balance notes'),
-        sa.CheckConstraint('current_balance >= 0', name='non_negative_current_balance_vault'),
-        sa.CheckConstraint('reserved_balance >= 0', name='non_negative_reserved_balance_vault'),
-        sa.CheckConstraint('minimum_balance >= 0', name='non_negative_minimum_balance_vault'),
-        sa.CheckConstraint('reserved_balance <= current_balance', name='reserved_not_exceed_current_vault'),
-        sa.PrimaryKeyConstraint('id'),
-        sa.UniqueConstraint('vault_id', 'currency_code', name='unique_vault_currency')
-    )
-    op.create_index('idx_vault_currency_active', 'vault_balances', ['vault_id', 'currency_code', 'is_active'])
-    op.create_index('idx_vault_balance_thresholds', 'vault_balances', ['minimum_balance', 'reorder_threshold', 'critical_threshold'])
-    op.create_index('idx_vault_balance_updated', 'vault_balances', ['last_updated_at'])
-
-    # Create transactions table (main table with inheritance)
+    # Create transactions table (Level 4 - References customers, branches, users, exchange_rates)
     op.create_table(
         'transactions',
         sa.Column('id', sa.Integer(), autoincrement=True, nullable=False, comment='Primary key'),
@@ -172,6 +134,13 @@ def upgrade() -> None:
         sa.CheckConstraint('fee_amount >= 0', name='non_negative_fee'),
         sa.CheckConstraint('exchange_rate IS NULL OR exchange_rate > 0', name='positive_exchange_rate'),
         sa.CheckConstraint('aml_risk_score::integer >= 0 AND aml_risk_score::integer <= 100', name='valid_aml_risk_score'),
+        sa.ForeignKeyConstraint(['approved_by'], ['users.id'], ),
+        sa.ForeignKeyConstraint(['branch_id'], ['branches.id'], ),
+        sa.ForeignKeyConstraint(['customer_id'], ['customers.id'], ),
+        sa.ForeignKeyConstraint(['exchange_rate_id'], ['exchange_rates.id'], ),
+        sa.ForeignKeyConstraint(['original_transaction_id'], ['transactions.id'], ),
+        sa.ForeignKeyConstraint(['reversed_transaction_id'], ['transactions.id'], ),
+        sa.ForeignKeyConstraint(['user_id'], ['users.id'], ),
         sa.PrimaryKeyConstraint('id'),
         sa.UniqueConstraint('transaction_id')
     )
@@ -191,73 +160,57 @@ def upgrade() -> None:
     op.create_index(op.f('ix_transactions_from_currency_code'), 'transactions', ['from_currency_code'])
     op.create_index(op.f('ix_transactions_to_currency_code'), 'transactions', ['to_currency_code'])
 
-    # Create currency_exchanges table (inheritance from transactions)
-    op.create_table(
-        'currency_exchanges',
-        sa.Column('id', sa.Integer(), nullable=False, comment='Reference to parent transaction'),
-        sa.Column('buy_rate', sa.Numeric(precision=15, scale=8), nullable=True, comment='Buy rate offered to customer'),
-        sa.Column('sell_rate', sa.Numeric(precision=15, scale=8), nullable=True, comment='Sell rate offered to customer'),
-        sa.Column('spread', sa.Numeric(precision=8, scale=4), nullable=True, comment='Spread applied (difference from mid rate)'),
-        sa.Column('margin_percentage', sa.Numeric(precision=5, scale=4), nullable=True, comment='Margin percentage applied'),
-        sa.Column('rate_source', sa.String(length=100), nullable=True, comment='Source of the exchange rate'),
-        sa.Column('rate_timestamp', sa.DateTime(), nullable=True, comment='When the rate was quoted'),
-        sa.Column('rate_valid_until', sa.DateTime(), nullable=True, comment='Rate validity expiry'),
-        sa.Column('delivered_amount', sa.Numeric(precision=15, scale=4), nullable=True, comment='Actual amount delivered (may differ due to denominations)'),
-        sa.Column('denomination_breakdown', postgresql.JSON(astext_type=sa.Text()), nullable=True, comment='Breakdown of currency denominations'),
-        sa.ForeignKeyConstraint(['id'], ['transactions.id'], ),
-        sa.PrimaryKeyConstraint('id')
-    )
+    # Now add foreign key constraint to branch_balances.last_transaction_id
+    op.add_column('branch_balances', sa.Column('last_transaction_id', sa.Integer(), nullable=True, comment='ID of last transaction affecting this balance'))
+    op.create_foreign_key('fk_branch_balances_last_transaction', 'branch_balances', 'transactions', ['last_transaction_id'], ['id'])
 
-    # Create cash_transactions table (base for cash deposits/withdrawals)
+    # Create vault_balances table (Level 4 - References vaults, currencies, users, vault_transactions)
     op.create_table(
-        'cash_transactions',
-        sa.Column('id', sa.Integer(), nullable=False, comment='Reference to parent transaction'),
-        sa.Column('denomination_breakdown', postgresql.JSON(astext_type=sa.Text()), nullable=True, comment='Breakdown of cash denominations'),
-        sa.Column('counted_by', sa.Integer(), nullable=True, comment='User who counted the cash'),
-        sa.Column('verified_by', sa.Integer(), nullable=True, comment='User who verified the cash count'),
-        sa.Column('vault_transaction_id', sa.Integer(), nullable=True, comment='Related vault transaction'),
-        sa.ForeignKeyConstraint(['id'], ['transactions.id'], ),
-        sa.PrimaryKeyConstraint('id')
-    )
-
-    # Create transfers table
-    op.create_table(
-        'transfers',
-        sa.Column('id', sa.Integer(), nullable=False, comment='Reference to parent transaction'),
-        sa.Column('sender_name', sa.String(length=200), nullable=True, comment='Name of sender'),
-        sa.Column('sender_id_number', sa.String(length=50), nullable=True, comment='Sender identification number'),
-        sa.Column('sender_phone', sa.String(length=20), nullable=True, comment='Sender phone number'),
-        sa.Column('beneficiary_name', sa.String(length=200), nullable=True, comment='Name of beneficiary'),
-        sa.Column('beneficiary_id_number', sa.String(length=50), nullable=True, comment='Beneficiary identification number'),
-        sa.Column('beneficiary_phone', sa.String(length=20), nullable=True, comment='Beneficiary phone number'),
-        sa.Column('transfer_purpose', sa.String(length=255), nullable=True, comment='Purpose of transfer'),
-        sa.Column('destination_country', sa.String(length=3), nullable=True, comment='Destination country code'),
-        sa.Column('correspondent_bank', sa.String(length=200), nullable=True, comment='Correspondent bank information'),
-        sa.Column('delivery_method', sa.String(length=50), nullable=True, comment='How transfer will be delivered'),
-        sa.Column('pickup_location', sa.String(length=255), nullable=True, comment='Pickup location for beneficiary'),
-        sa.Column('tracking_number', sa.String(length=100), nullable=True, comment='Transfer tracking number'),
-        sa.Column('expected_delivery_date', sa.DateTime(), nullable=True, comment='Expected delivery date'),
-        sa.Column('delivered_at', sa.DateTime(), nullable=True, comment='When transfer was delivered'),
-        sa.Column('delivered_to', sa.String(length=200), nullable=True, comment='Who received the transfer'),
-        sa.ForeignKeyConstraint(['id'], ['transactions.id'], ),
+        'vault_balances',
+        sa.Column('id', sa.Integer(), autoincrement=True, nullable=False, comment='Primary key'),
+        sa.Column('created_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False, comment='Record creation timestamp'),
+        sa.Column('updated_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False, comment='Record last update timestamp'),
+        sa.Column('is_deleted', sa.Boolean(), server_default='false', nullable=False, comment='Soft delete flag'),
+        sa.Column('deleted_at', sa.DateTime(), nullable=True, comment='Soft delete timestamp'),
+        sa.Column('created_by', sa.Integer(), nullable=True, comment='User ID who created this record'),
+        sa.Column('updated_by', sa.Integer(), nullable=True, comment='User ID who last updated this record'),
+        sa.Column('vault_id', sa.Integer(), nullable=False, comment='Reference to vault'),
+        sa.Column('currency_id', sa.Integer(), nullable=False, comment='Reference to currency'),
+        sa.Column('currency_code', sa.String(length=3), nullable=False, comment='Currency code for easier querying'),
+        sa.Column('current_balance', sa.Numeric(precision=18, scale=4), nullable=False, server_default='0.0000', comment='Current vault balance'),
+        sa.Column('reserved_balance', sa.Numeric(precision=18, scale=4), nullable=False, server_default='0.0000', comment='Reserved amount for pending operations'),
+        sa.Column('denomination_breakdown', postgresql.JSON(astext_type=sa.Text()), nullable=True, comment='Physical denomination breakdown'),
+        sa.Column('last_count_amount', sa.Numeric(precision=18, scale=4), nullable=True, comment='Last physically counted amount'),
+        sa.Column('last_count_date', sa.DateTime(), nullable=True, comment='Last physical count date'),
+        sa.Column('last_counted_by', sa.Integer(), nullable=True, comment='User who performed last count'),
+        sa.Column('count_variance', sa.Numeric(precision=18, scale=4), nullable=True, comment='Variance from last count'),
+        sa.Column('minimum_balance', sa.Numeric(precision=18, scale=4), nullable=False, server_default='0.0000', comment='Minimum balance to maintain'),
+        sa.Column('maximum_balance', sa.Numeric(precision=18, scale=4), nullable=True, comment='Maximum balance allowed'),
+        sa.Column('reorder_threshold', sa.Numeric(precision=18, scale=4), nullable=True, comment='Threshold for reorder alerts'),
+        sa.Column('critical_threshold', sa.Numeric(precision=18, scale=4), nullable=True, comment='Critical low balance threshold'),
+        sa.Column('is_active', sa.Boolean(), server_default='true', nullable=False, comment='Whether this balance is active'),
+        sa.Column('last_transaction_id', sa.Integer(), nullable=True, comment='Last transaction affecting this balance'),
+        sa.Column('last_updated_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False, comment='Last balance update timestamp'),
+        sa.Column('last_reconciliation_date', sa.DateTime(), nullable=True, comment='Last reconciliation date'),
+        sa.Column('reconciliation_variance', sa.Numeric(precision=18, scale=4), nullable=True, comment='Variance from last reconciliation'),
+        sa.Column('reconciled_by', sa.Integer(), nullable=True, comment='User who performed last reconciliation'),
+        sa.Column('notes', sa.Text(), nullable=True, comment='Additional balance notes'),
+        sa.CheckConstraint('current_balance >= 0', name='non_negative_current_balance_vault'),
+        sa.CheckConstraint('reserved_balance >= 0', name='non_negative_reserved_balance_vault'),
+        sa.CheckConstraint('minimum_balance >= 0', name='non_negative_minimum_balance_vault'),
+        sa.CheckConstraint('reserved_balance <= current_balance', name='reserved_not_exceed_current_vault'),
+        sa.ForeignKeyConstraint(['currency_id'], ['currencies.id'], ),
+        sa.ForeignKeyConstraint(['last_counted_by'], ['users.id'], ),
+        sa.ForeignKeyConstraint(['reconciled_by'], ['users.id'], ),
+        sa.ForeignKeyConstraint(['vault_id'], ['vaults.id'], ),
         sa.PrimaryKeyConstraint('id'),
-        sa.UniqueConstraint('tracking_number')
+        sa.UniqueConstraint('vault_id', 'currency_code', name='unique_vault_currency')
     )
+    op.create_index('idx_vault_currency_active', 'vault_balances', ['vault_id', 'currency_code', 'is_active'])
+    op.create_index('idx_vault_balance_thresholds', 'vault_balances', ['minimum_balance', 'reorder_threshold', 'critical_threshold'])
+    op.create_index('idx_vault_balance_updated', 'vault_balances', ['last_updated_at'])
 
-    # Create commissions table
-    op.create_table(
-        'commissions',
-        sa.Column('id', sa.Integer(), nullable=False, comment='Reference to parent transaction'),
-        sa.Column('source_transaction_id', sa.Integer(), nullable=False, comment='Transaction that generated this commission'),
-        sa.Column('commission_type', sa.String(length=50), nullable=False, comment='Type of commission (exchange, transfer, etc.)'),
-        sa.Column('rate_applied', sa.Numeric(precision=5, scale=4), nullable=False, comment='Commission rate that was applied'),
-        sa.Column('base_amount', sa.Numeric(precision=15, scale=4), nullable=False, comment='Base amount commission was calculated on'),
-        sa.ForeignKeyConstraint(['id'], ['transactions.id'], ),
-        sa.ForeignKeyConstraint(['source_transaction_id'], ['transactions.id'], ),
-        sa.PrimaryKeyConstraint('id')
-    )
-
-    # Create vault_transactions table
+    # Create vault_transactions table (Level 5 - References vaults, users, transactions)
     op.create_table(
         'vault_transactions',
         sa.Column('id', sa.Integer(), autoincrement=True, nullable=False, comment='Primary key'),
@@ -300,6 +253,13 @@ def upgrade() -> None:
         sa.CheckConstraint("direction IN ('in', 'out')", name='valid_direction'),
         sa.CheckConstraint("status IN ('pending', 'authorized', 'completed', 'cancelled', 'failed')", name='valid_vault_status'),
         sa.CheckConstraint('amount > 0', name='positive_amount_vault'),
+        sa.ForeignKeyConstraint(['approved_by'], ['users.id'], ),
+        sa.ForeignKeyConstraint(['first_authorizer_id'], ['users.id'], ),
+        sa.ForeignKeyConstraint(['processed_by'], ['users.id'], ),
+        sa.ForeignKeyConstraint(['related_transaction_id'], ['transactions.id'], ),
+        sa.ForeignKeyConstraint(['second_authorizer_id'], ['users.id'], ),
+        sa.ForeignKeyConstraint(['vault_id'], ['vaults.id'], ),
+        sa.ForeignKeyConstraint(['verified_by'], ['users.id'], ),
         sa.PrimaryKeyConstraint('id'),
         sa.UniqueConstraint('transaction_id', name='unique_vault_transaction_id')
     )
@@ -312,16 +272,93 @@ def upgrade() -> None:
     op.create_index(op.f('ix_vault_transactions_vault_id'), 'vault_transactions', ['vault_id'])
     op.create_index(op.f('ix_vault_transactions_currency_code'), 'vault_transactions', ['currency_code'])
 
+    # Now add foreign key constraint to vault_balances.last_transaction_id
+    op.create_foreign_key('fk_vault_balances_last_transaction', 'vault_balances', 'vault_transactions', ['last_transaction_id'], ['id'])
+
+    # Create currency_exchanges table (Level 5 - Inherits from transactions)
+    op.create_table(
+        'currency_exchanges',
+        sa.Column('id', sa.Integer(), nullable=False, comment='Reference to parent transaction'),
+        sa.Column('buy_rate', sa.Numeric(precision=15, scale=8), nullable=True, comment='Buy rate offered to customer'),
+        sa.Column('sell_rate', sa.Numeric(precision=15, scale=8), nullable=True, comment='Sell rate offered to customer'),
+        sa.Column('spread', sa.Numeric(precision=8, scale=4), nullable=True, comment='Spread applied (difference from mid rate)'),
+        sa.Column('margin_percentage', sa.Numeric(precision=5, scale=4), nullable=True, comment='Margin percentage applied'),
+        sa.Column('rate_source', sa.String(length=100), nullable=True, comment='Source of the exchange rate'),
+        sa.Column('rate_timestamp', sa.DateTime(), nullable=True, comment='When the rate was quoted'),
+        sa.Column('rate_valid_until', sa.DateTime(), nullable=True, comment='Rate validity expiry'),
+        sa.Column('delivered_amount', sa.Numeric(precision=15, scale=4), nullable=True, comment='Actual amount delivered (may differ due to denominations)'),
+        sa.Column('denomination_breakdown', postgresql.JSON(astext_type=sa.Text()), nullable=True, comment='Breakdown of currency denominations'),
+        sa.ForeignKeyConstraint(['id'], ['transactions.id'], ),
+        sa.PrimaryKeyConstraint('id')
+    )
+
+    # Create cash_transactions table (Level 5 - Inherits from transactions)
+    op.create_table(
+        'cash_transactions',
+        sa.Column('id', sa.Integer(), nullable=False, comment='Reference to parent transaction'),
+        sa.Column('denomination_breakdown', postgresql.JSON(astext_type=sa.Text()), nullable=True, comment='Breakdown of cash denominations'),
+        sa.Column('counted_by', sa.Integer(), nullable=True, comment='User who counted the cash'),
+        sa.Column('verified_by', sa.Integer(), nullable=True, comment='User who verified the cash count'),
+        sa.Column('vault_transaction_id', sa.Integer(), nullable=True, comment='Related vault transaction'),
+        sa.ForeignKeyConstraint(['counted_by'], ['users.id'], ),
+        sa.ForeignKeyConstraint(['id'], ['transactions.id'], ),
+        sa.ForeignKeyConstraint(['vault_transaction_id'], ['vault_transactions.id'], ),
+        sa.ForeignKeyConstraint(['verified_by'], ['users.id'], ),
+        sa.PrimaryKeyConstraint('id')
+    )
+
+    # Create transfers table (Level 5 - Inherits from transactions)
+    op.create_table(
+        'transfers',
+        sa.Column('id', sa.Integer(), nullable=False, comment='Reference to parent transaction'),
+        sa.Column('sender_name', sa.String(length=200), nullable=True, comment='Name of sender'),
+        sa.Column('sender_id_number', sa.String(length=50), nullable=True, comment='Sender identification number'),
+        sa.Column('sender_phone', sa.String(length=20), nullable=True, comment='Sender phone number'),
+        sa.Column('beneficiary_name', sa.String(length=200), nullable=True, comment='Name of beneficiary'),
+        sa.Column('beneficiary_id_number', sa.String(length=50), nullable=True, comment='Beneficiary identification number'),
+        sa.Column('beneficiary_phone', sa.String(length=20), nullable=True, comment='Beneficiary phone number'),
+        sa.Column('transfer_purpose', sa.String(length=255), nullable=True, comment='Purpose of transfer'),
+        sa.Column('destination_country', sa.String(length=3), nullable=True, comment='Destination country code'),
+        sa.Column('correspondent_bank', sa.String(length=200), nullable=True, comment='Correspondent bank information'),
+        sa.Column('delivery_method', sa.String(length=50), nullable=True, comment='How transfer will be delivered'),
+        sa.Column('pickup_location', sa.String(length=255), nullable=True, comment='Pickup location for beneficiary'),
+        sa.Column('tracking_number', sa.String(length=100), nullable=True, comment='Transfer tracking number'),
+        sa.Column('expected_delivery_date', sa.DateTime(), nullable=True, comment='Expected delivery date'),
+        sa.Column('delivered_at', sa.DateTime(), nullable=True, comment='When transfer was delivered'),
+        sa.Column('delivered_to', sa.String(length=200), nullable=True, comment='Who received the transfer'),
+        sa.ForeignKeyConstraint(['id'], ['transactions.id'], ),
+        sa.PrimaryKeyConstraint('id'),
+        sa.UniqueConstraint('tracking_number')
+    )
+
+    # Create commissions table (Level 5 - Inherits from transactions)
+    op.create_table(
+        'commissions',
+        sa.Column('id', sa.Integer(), nullable=False, comment='Reference to parent transaction'),
+        sa.Column('source_transaction_id', sa.Integer(), nullable=False, comment='Transaction that generated this commission'),
+        sa.Column('commission_type', sa.String(length=50), nullable=False, comment='Type of commission (exchange, transfer, etc.)'),
+        sa.Column('rate_applied', sa.Numeric(precision=5, scale=4), nullable=False, comment='Commission rate that was applied'),
+        sa.Column('base_amount', sa.Numeric(precision=15, scale=4), nullable=False, comment='Base amount commission was calculated on'),
+        sa.ForeignKeyConstraint(['id'], ['transactions.id'], ),
+        sa.ForeignKeyConstraint(['source_transaction_id'], ['transactions.id'], ),
+        sa.PrimaryKeyConstraint('id')
+    )
+
 
 def downgrade() -> None:
     """Drop all tables created in upgrade."""
     
     # Drop in reverse order of creation
-    op.drop_table('vault_transactions')
     op.drop_table('commissions')
     op.drop_table('transfers')
     op.drop_table('cash_transactions')
     op.drop_table('currency_exchanges')
-    op.drop_table('transactions')
+    
+    # Remove foreign key constraints before dropping tables
+    op.drop_constraint('fk_vault_balances_last_transaction', 'vault_balances', type_='foreignkey')
+    op.drop_constraint('fk_branch_balances_last_transaction', 'branch_balances', type_='foreignkey')
+    
+    op.drop_table('vault_transactions')
     op.drop_table('vault_balances')
+    op.drop_table('transactions')
     op.drop_table('vaults')

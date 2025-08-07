@@ -10,7 +10,7 @@ from decimal import Decimal
 from typing import Optional, Dict, Any
 from sqlalchemy import (
     Column, String, Numeric, Boolean, DateTime, Text, ForeignKey,
-    Index, CheckConstraint, UniqueConstraint, func
+    Index, CheckConstraint, UniqueConstraint, func, Integer
 )
 from sqlalchemy.orm import relationship, validates
 from sqlalchemy.ext.hybrid import hybrid_property
@@ -132,7 +132,7 @@ class Currency(BaseModelWithSoftDelete):
         comment="Whether currency requires special handling procedures"
     )
     
-    # Relationships
+    # Relationships (Fixed)
     exchange_rates_from = relationship(
         "ExchangeRate",
         foreign_keys="ExchangeRate.from_currency_id",
@@ -144,6 +144,18 @@ class Currency(BaseModelWithSoftDelete):
         "ExchangeRate",
         foreign_keys="ExchangeRate.to_currency_id", 
         back_populates="to_currency",
+        lazy="dynamic"
+    )
+    
+    branch_balances = relationship(
+        "BranchBalance",
+        back_populates="currency",
+        lazy="dynamic"
+    )
+    
+    vault_balances = relationship(
+        "VaultBalance",
+        back_populates="currency",
         lazy="dynamic"
     )
     
@@ -238,16 +250,18 @@ class ExchangeRate(BaseModelWithSoftDelete):
     
     __tablename__ = "exchange_rates"
     
-    # Currency references
+    # Currency references (Fixed Foreign Keys)
     from_currency_id = Column(
-        Integer,  # ForeignKey('currencies.id')
+        Integer,
+        ForeignKey('currencies.id'),
         nullable=False,
         index=True,
         comment="Source currency ID"
     )
     
     to_currency_id = Column(
-        Integer,  # ForeignKey('currencies.id')
+        Integer,
+        ForeignKey('currencies.id'),
         nullable=False,
         index=True,
         comment="Target currency ID"
@@ -353,6 +367,7 @@ class ExchangeRate(BaseModelWithSoftDelete):
     # Administrative fields
     approved_by = Column(
         Integer,
+        ForeignKey('users.id'),
         nullable=True,
         comment="User ID who approved this rate"
     )
@@ -369,7 +384,7 @@ class ExchangeRate(BaseModelWithSoftDelete):
         comment="Additional notes about this rate"
     )
     
-    # Relationships
+    # Relationships (Fixed)
     from_currency = relationship(
         "Currency",
         foreign_keys=[from_currency_id],
@@ -380,6 +395,18 @@ class ExchangeRate(BaseModelWithSoftDelete):
         "Currency", 
         foreign_keys=[to_currency_id],
         back_populates="exchange_rates_to"
+    )
+    
+    approver = relationship(
+        "User",
+        foreign_keys=[approved_by]
+    )
+    
+    # Transactions using this rate
+    transactions = relationship(
+        "Transaction",
+        foreign_keys="Transaction.exchange_rate_id",
+        back_populates="exchange_rate"
     )
     
     # Table constraints and indexes

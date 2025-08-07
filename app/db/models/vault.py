@@ -104,7 +104,8 @@ class Vault(BaseModelWithSoftDelete):
     )
     
     branch_id = Column(
-        Integer,  # ForeignKey('branches.id')
+        Integer,
+        ForeignKey('branches.id'),
         nullable=True,
         comment="Associated branch (if applicable)"
     )
@@ -124,15 +125,17 @@ class Vault(BaseModelWithSoftDelete):
         comment="JSON array of authorized user IDs"
     )
     
-    # Vault custodians
+    # Vault custodians (Fixed Foreign Keys)
     primary_custodian_id = Column(
-        Integer,  # ForeignKey('users.id')
+        Integer,
+        ForeignKey('users.id'),
         nullable=True,
         comment="Primary vault custodian"
     )
     
     secondary_custodian_id = Column(
-        Integer,  # ForeignKey('users.id')
+        Integer,
+        ForeignKey('users.id'),
         nullable=True,
         comment="Secondary vault custodian"
     )
@@ -158,7 +161,8 @@ class Vault(BaseModelWithSoftDelete):
     )
     
     last_audit_by = Column(
-        Integer,  # ForeignKey('users.id')
+        Integer,
+        ForeignKey('users.id'),
         nullable=True,
         comment="User who conducted last audit"
     )
@@ -227,7 +231,7 @@ class Vault(BaseModelWithSoftDelete):
         comment="Additional vault information"
     )
     
-    # Relationships
+    # Relationships (Fixed)
     balances = relationship(
         "VaultBalance",
         back_populates="vault",
@@ -244,7 +248,7 @@ class Vault(BaseModelWithSoftDelete):
     branch = relationship(
         "Branch",
         foreign_keys=[branch_id],
-        backref="vault"
+        back_populates="vaults"
     )
     
     primary_custodian = relationship(
@@ -257,6 +261,12 @@ class Vault(BaseModelWithSoftDelete):
         "User",
         foreign_keys=[secondary_custodian_id],
         backref="secondary_vaults"
+    )
+    
+    last_auditor = relationship(
+        "User",
+        foreign_keys=[last_audit_by],
+        backref="audited_vaults"
     )
     
     # Table constraints and indexes
@@ -311,7 +321,7 @@ class Vault(BaseModelWithSoftDelete):
             raise ValueError("Vault code is required")
         
         import re
-        if not re.match(r'^VLT\d{3,6}$', code.upper()):
+        if not re.match(r'^VLT\d{3,6}, code.upper()):
             raise ValueError("Vault code must be in format: VLT + 3-6 digits")
         
         return code.upper()
@@ -405,16 +415,18 @@ class VaultBalance(BaseModelWithSoftDelete):
     
     __tablename__ = "vault_balances"
     
-    # Vault and currency references
+    # Vault and currency references (Fixed Foreign Keys)
     vault_id = Column(
-        Integer,  # ForeignKey('vaults.id')
+        Integer,
+        ForeignKey('vaults.id'),
         nullable=False,
         index=True,
         comment="Reference to vault"
     )
     
     currency_id = Column(
-        Integer,  # ForeignKey('currencies.id')
+        Integer,
+        ForeignKey('currencies.id'),
         nullable=False,
         index=True,
         comment="Reference to currency"
@@ -462,7 +474,8 @@ class VaultBalance(BaseModelWithSoftDelete):
     )
     
     last_counted_by = Column(
-        Integer,  # ForeignKey('users.id')
+        Integer,
+        ForeignKey('users.id'),
         nullable=True,
         comment="User who performed last count"
     )
@@ -509,7 +522,8 @@ class VaultBalance(BaseModelWithSoftDelete):
     )
     
     last_transaction_id = Column(
-        Integer,  # ForeignKey('vault_transactions.id')
+        Integer,
+        ForeignKey('vault_transactions.id'),
         nullable=True,
         comment="Last transaction affecting this balance"
     )
@@ -536,7 +550,8 @@ class VaultBalance(BaseModelWithSoftDelete):
     )
     
     reconciled_by = Column(
-        Integer,  # ForeignKey('users.id')
+        Integer,
+        ForeignKey('users.id'),
         nullable=True,
         comment="User who performed last reconciliation"
     )
@@ -548,7 +563,7 @@ class VaultBalance(BaseModelWithSoftDelete):
         comment="Additional balance notes"
     )
     
-    # Relationships
+    # Relationships (Fixed)
     vault = relationship(
         "Vault",
         back_populates="balances"
@@ -556,7 +571,26 @@ class VaultBalance(BaseModelWithSoftDelete):
     
     currency = relationship(
         "Currency",
-        foreign_keys=[currency_id]
+        foreign_keys=[currency_id],
+        back_populates="vault_balances"
+    )
+    
+    last_transaction = relationship(
+        "VaultTransaction",
+        foreign_keys=[last_transaction_id],
+        back_populates="affected_balances"
+    )
+    
+    last_counter = relationship(
+        "User",
+        foreign_keys=[last_counted_by],
+        backref="counted_vault_balances"
+    )
+    
+    reconciler = relationship(
+        "User",
+        foreign_keys=[reconciled_by],
+        backref="reconciled_vault_balances"
     )
     
     # Table constraints and indexes
@@ -564,19 +598,19 @@ class VaultBalance(BaseModelWithSoftDelete):
         UniqueConstraint('vault_id', 'currency_code', name='unique_vault_currency'),
         CheckConstraint(
             "current_balance >= 0",
-            name="non_negative_current_balance"
+            name="non_negative_current_balance_vault"
         ),
         CheckConstraint(
             "reserved_balance >= 0",
-            name="non_negative_reserved_balance"
+            name="non_negative_reserved_balance_vault"
         ),
         CheckConstraint(
             "minimum_balance >= 0",
-            name="non_negative_minimum_balance"
+            name="non_negative_minimum_balance_vault"
         ),
         CheckConstraint(
             "reserved_balance <= current_balance",
-            name="reserved_not_exceed_current"
+            name="reserved_not_exceed_current_vault"
         ),
         Index("idx_vault_currency_active", vault_id, currency_code, is_active),
         Index("idx_vault_balance_thresholds", minimum_balance, reorder_threshold, critical_threshold),
@@ -703,7 +737,8 @@ class VaultTransaction(BaseModelWithSoftDelete):
     )
     
     vault_id = Column(
-        Integer,  # ForeignKey('vaults.id')
+        Integer,
+        ForeignKey('vaults.id'),
         nullable=False,
         index=True,
         comment="Vault involved in transaction"
@@ -772,7 +807,7 @@ class VaultTransaction(BaseModelWithSoftDelete):
         comment="Destination reference"
     )
     
-    # Transaction processing
+    # Transaction processing (Fixed Foreign Keys)
     status = Column(
         String(20),
         nullable=False,
@@ -781,13 +816,15 @@ class VaultTransaction(BaseModelWithSoftDelete):
     )
     
     processed_by = Column(
-        Integer,  # ForeignKey('users.id')
+        Integer,
+        ForeignKey('users.id'),
         nullable=False,
         comment="User who processed transaction"
     )
     
     approved_by = Column(
-        Integer,  # ForeignKey('users.id')
+        Integer,
+        ForeignKey('users.id'),
         nullable=True,
         comment="User who approved transaction"
     )
@@ -824,7 +861,7 @@ class VaultTransaction(BaseModelWithSoftDelete):
         comment="Security seal numbers"
     )
     
-    # Security and verification
+    # Security and verification (Fixed Foreign Keys)
     requires_dual_authorization = Column(
         Boolean,
         nullable=False,
@@ -834,19 +871,22 @@ class VaultTransaction(BaseModelWithSoftDelete):
     )
     
     first_authorizer_id = Column(
-        Integer,  # ForeignKey('users.id')
+        Integer,
+        ForeignKey('users.id'),
         nullable=True,
         comment="First authorizing user"
     )
     
     second_authorizer_id = Column(
-        Integer,  # ForeignKey('users.id')
+        Integer,
+        ForeignKey('users.id'),
         nullable=True,
         comment="Second authorizing user"
     )
     
     verified_by = Column(
-        Integer,  # ForeignKey('users.id')
+        Integer,
+        ForeignKey('users.id'),
         nullable=True,
         comment="User who verified the transaction"
     )
@@ -859,7 +899,8 @@ class VaultTransaction(BaseModelWithSoftDelete):
     
     # Related transactions
     related_transaction_id = Column(
-        Integer,  # ForeignKey('transactions.id')
+        Integer,
+        ForeignKey('transactions.id'),
         nullable=True,
         comment="Related customer transaction"
     )
@@ -883,7 +924,7 @@ class VaultTransaction(BaseModelWithSoftDelete):
         comment="Transaction notes"
     )
     
-    # Relationships
+    # Relationships (Fixed)
     vault = relationship(
         "Vault",
         back_populates="transactions"
@@ -899,6 +940,36 @@ class VaultTransaction(BaseModelWithSoftDelete):
         "User",
         foreign_keys=[approved_by],
         backref="approved_vault_transactions"
+    )
+    
+    first_authorizer = relationship(
+        "User",
+        foreign_keys=[first_authorizer_id],
+        backref="first_authorized_vault_transactions"
+    )
+    
+    second_authorizer = relationship(
+        "User",
+        foreign_keys=[second_authorizer_id],
+        backref="second_authorized_vault_transactions"
+    )
+    
+    verifier = relationship(
+        "User",
+        foreign_keys=[verified_by],
+        backref="verified_vault_transactions"
+    )
+    
+    related_transaction = relationship(
+        "Transaction",
+        foreign_keys=[related_transaction_id],
+        backref="related_vault_transactions"
+    )
+    
+    affected_balances = relationship(
+        "VaultBalance",
+        foreign_keys="VaultBalance.last_transaction_id",
+        back_populates="last_transaction"
     )
     
     # Table constraints and indexes
@@ -917,7 +988,7 @@ class VaultTransaction(BaseModelWithSoftDelete):
         ),
         CheckConstraint(
             "amount > 0",
-            name="positive_amount"
+            name="positive_amount_vault"
         ),
         Index("idx_vault_transaction_date", vault_id, transaction_date),
         Index("idx_vault_currency_amount", vault_id, currency_code, amount),

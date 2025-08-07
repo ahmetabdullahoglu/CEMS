@@ -50,23 +50,26 @@ class Transaction(BaseModelWithSoftDelete):
         comment="External reference number"
     )
     
-    # Transaction parties
+    # Transaction parties (Fixed Foreign Keys)
     customer_id = Column(
-        Integer,  # ForeignKey('customers.id')
+        Integer,
+        ForeignKey('customers.id'),
         nullable=True,
         index=True,
         comment="Customer involved in transaction"
     )
     
     branch_id = Column(
-        Integer,  # ForeignKey('branches.id')
+        Integer,
+        ForeignKey('branches.id'),
         nullable=False,
         index=True,
         comment="Branch where transaction occurred"
     )
     
     user_id = Column(
-        Integer,  # ForeignKey('users.id')
+        Integer,
+        ForeignKey('users.id'),
         nullable=False,
         index=True,
         comment="User who processed the transaction"
@@ -106,7 +109,8 @@ class Transaction(BaseModelWithSoftDelete):
     )
     
     exchange_rate_id = Column(
-        Integer,  # ForeignKey('exchange_rates.id')
+        Integer,
+        ForeignKey('exchange_rates.id'),
         nullable=True,
         comment="Reference to exchange rate record used"
     )
@@ -181,7 +185,7 @@ class Transaction(BaseModelWithSoftDelete):
         comment="Payment reference (check number, card reference, etc.)"
     )
     
-    # Approval workflow
+    # Approval workflow (Fixed Foreign Key)
     requires_approval = Column(
         Boolean,
         nullable=False,
@@ -191,7 +195,8 @@ class Transaction(BaseModelWithSoftDelete):
     )
     
     approved_by = Column(
-        Integer,  # ForeignKey('users.id')
+        Integer,
+        ForeignKey('users.id'),
         nullable=True,
         comment="User who approved the transaction"
     )
@@ -249,15 +254,17 @@ class Transaction(BaseModelWithSoftDelete):
         comment="Compliance flags or alerts (JSON array)"
     )
     
-    # Reversal information
+    # Reversal information (Fixed Foreign Keys)
     original_transaction_id = Column(
-        Integer,  # ForeignKey('transactions.id')
+        Integer,
+        ForeignKey('transactions.id'),
         nullable=True,
         comment="Original transaction if this is a reversal"
     )
     
     reversed_transaction_id = Column(
-        Integer,  # ForeignKey('transactions.id')
+        Integer,
+        ForeignKey('transactions.id'),
         nullable=True,
         comment="Reversal transaction ID if this was reversed"
     )
@@ -296,29 +303,35 @@ class Transaction(BaseModelWithSoftDelete):
         comment="Status in external system"
     )
     
-    # Relationships
+    # Relationships (Fixed)
     customer = relationship(
         "Customer",
-        back_populates="transactions",
-        foreign_keys=[customer_id]
+        foreign_keys=[customer_id],
+        back_populates="transactions"
     )
     
     branch = relationship(
         "Branch",
-        back_populates="transactions",
-        foreign_keys=[branch_id]
+        foreign_keys=[branch_id],
+        back_populates="transactions"
     )
     
     user = relationship(
         "User",
         foreign_keys=[user_id],
-        backref="processed_transactions"
+        back_populates="processed_transactions"
     )
     
     approver = relationship(
         "User",
         foreign_keys=[approved_by],
-        backref="approved_transactions"
+        back_populates="approved_transactions"
+    )
+    
+    exchange_rate = relationship(
+        "ExchangeRate",
+        foreign_keys=[exchange_rate_id],
+        back_populates="transactions"
     )
     
     original_transaction = relationship(
@@ -326,6 +339,13 @@ class Transaction(BaseModelWithSoftDelete):
         remote_side=[id],
         foreign_keys=[original_transaction_id],
         backref="reversals"
+    )
+    
+    reversed_transaction = relationship(
+        "Transaction",
+        remote_side=[id],
+        foreign_keys=[reversed_transaction_id],
+        back_populates="original_transaction"
     )
     
     # Table constraints and indexes
@@ -420,7 +440,8 @@ class Transaction(BaseModelWithSoftDelete):
             return transaction_id
         
         import re
-        if not re.match(r'^TXN\d{10}$', transaction_id.upper()):
+        if not re.match(r'^TXN\d{10}
+        , transaction_id.upper()):
             raise ValueError("Transaction ID must be in format: TXN + 10 digits")
         
         return transaction_id.upper()
@@ -735,63 +756,40 @@ class CashTransaction(Transaction):
     )
     
     counted_by = Column(
-        Integer,  # ForeignKey('users.id')
+        Integer,
+        ForeignKey('users.id'),
         nullable=True,
         comment="User who counted the cash"
     )
     
     verified_by = Column(
-        Integer,  # ForeignKey('users.id')
+        Integer,
+        ForeignKey('users.id'),
         nullable=True,
         comment="User who verified the cash count"
     )
     
     vault_transaction_id = Column(
-        Integer,  # ForeignKey('vault_transactions.id')
+        Integer,
+        ForeignKey('vault_transactions.id'),
         nullable=True,
         comment="Related vault transaction"
     )
-
-
-class CashDeposit(CashTransaction):
-    """Cash deposit transaction model."""
     
-    __mapper_args__ = {
-        'polymorphic_identity': TransactionType.CASH_DEPOSIT.value
-    }
-    
-    # Deposit source information
-    deposit_source = Column(
-        String(100),
-        nullable=True,
-        comment="Source of the deposited funds"
+    # Relationships
+    counter = relationship(
+        "User",
+        foreign_keys=[counted_by]
     )
     
-    source_account = Column(
-        String(100),
-        nullable=True,
-        comment="Source account reference"
-    )
-
-
-class CashWithdrawal(CashTransaction):
-    """Cash withdrawal transaction model."""
-    
-    __mapper_args__ = {
-        'polymorphic_identity': TransactionType.CASH_WITHDRAWAL.value
-    }
-    
-    # Withdrawal destination
-    withdrawal_purpose = Column(
-        String(255),
-        nullable=True,
-        comment="Purpose of withdrawal"
+    verifier = relationship(
+        "User",
+        foreign_keys=[verified_by]
     )
     
-    authorized_by = Column(
-        Integer,  # ForeignKey('users.id')
-        nullable=True,
-        comment="User who authorized large withdrawal"
+    vault_transaction = relationship(
+        "VaultTransaction",
+        foreign_keys=[vault_transaction_id]
     )
 
 
@@ -926,7 +924,8 @@ class Commission(Transaction):
     
     # Commission details
     source_transaction_id = Column(
-        Integer,  # ForeignKey('transactions.id')
+        Integer,
+        ForeignKey('transactions.id'),
         nullable=False,
         comment="Transaction that generated this commission"
     )
