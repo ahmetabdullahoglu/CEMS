@@ -240,14 +240,14 @@ class ExchangeRate(BaseModelWithSoftDelete):
     
     # Currency references
     from_currency_id = Column(
-        String(50),  # ForeignKey('currencies.id')
+        Integer,  # ForeignKey('currencies.id')
         nullable=False,
         index=True,
         comment="Source currency ID"
     )
     
     to_currency_id = Column(
-        String(50),  # ForeignKey('currencies.id')
+        Integer,  # ForeignKey('currencies.id')
         nullable=False,
         index=True,
         comment="Target currency ID"

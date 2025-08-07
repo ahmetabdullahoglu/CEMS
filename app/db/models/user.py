@@ -245,7 +245,7 @@ class User(BaseModelWithSoftDelete):
     
     # Branch assignment (foreign key to be added when Branch model is created)
     branch_id = Column(
-        String(50),  # Will be ForeignKey('branches.id') when Branch model exists
+        Integer,  # Will be ForeignKey('branches.id') when Branch model exists
         nullable=True,
         index=True,
         comment="ID of the branch user is assigned to"
@@ -482,14 +482,14 @@ class UserRole(BaseModelWithSoftDelete):
     
     # Foreign keys
     user_id = Column(
-        String(50),  # ForeignKey('users.id')
+        Integer,  # ForeignKey('users.id')
         nullable=False,
         index=True,
         comment="Reference to user"
     )
     
     role_id = Column(
-        String(50),  # ForeignKey('roles.id')
+        Integer,  # ForeignKey('roles.id')
         nullable=False,
         index=True,
         comment="Reference to role"
