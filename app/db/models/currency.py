@@ -352,7 +352,7 @@ class ExchangeRate(BaseModelWithSoftDelete):
     
     # Administrative fields
     approved_by = Column(
-        String(50),
+        Integer,
         nullable=True,
         comment="User ID who approved this rate"
     )

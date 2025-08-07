@@ -140,13 +140,13 @@ class AuditMixin:
     """
     
     created_by = Column(
-        String(50),
+        Integer,
         nullable=True,
         comment="User ID who created this record"
     )
     
     updated_by = Column(
-        String(50),
+        Integer,
         nullable=True,
         comment="User ID who last updated this record"
     )

@@ -497,7 +497,7 @@ class UserRole(BaseModelWithSoftDelete):
     
     # Assignment metadata
     assigned_by = Column(
-        String(50),
+        Integer,
         nullable=True,
         comment="ID of user who assigned this role"
     )
