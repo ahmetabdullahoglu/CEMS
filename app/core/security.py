@@ -1,44 +1,332 @@
 """
 Module: security
-Purpose: Authentication, authorization, and security utilities for CEMS
+Purpose: Enhanced authentication, authorization, and security utilities for CEMS
 Author: CEMS Development Team
 Date: 2024
 """
 
 from datetime import datetime, timedelta
-from typing import Any, Union, Optional, Dict
+from typing import Any, Union, Optional, Dict, List, Set
+from collections import defaultdict, deque
+import time
+import threading
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from passlib.exc import InvalidHashError
 import secrets
 import hashlib
 import hmac
+import re
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
 from app.core.config import settings
-from app.core.exceptions import AuthenticationException, TokenExpiredException
+from app.core.exceptions import (
+    AuthenticationException, 
+    TokenExpiredException,
+    InvalidCredentialsException,
+    AccountLockedException,
+    PasswordStrengthException,
+    RateLimitExceededException
+)
 
-# Password hashing context
+# Password hashing context with enhanced security
 pwd_context = CryptContext(
     schemes=["bcrypt"],
     deprecated="auto",
-    bcrypt__rounds=12  # Increased rounds for better security
+    bcrypt__rounds=12,  # Increased rounds for better security
+    bcrypt__ident="2b"  # Use bcrypt variant 2b
 )
+
+
+class TokenBlacklist:
+    """
+    In-memory token blacklist for logged out tokens.
+    In production, should use Redis or similar external store.
+    """
+    
+    def __init__(self):
+        """Initialize token blacklist."""
+        self._blacklisted_tokens: Set[str] = set()
+        self._token_expiry: Dict[str, datetime] = {}
+        self._lock = threading.Lock()
+    
+    def add_token(self, token: str, expiry: datetime) -> None:
+        """
+        Add token to blacklist.
+        
+        Args:
+            token: JWT token to blacklist
+            expiry: Token expiry time
+        """
+        with self._lock:
+            self._blacklisted_tokens.add(token)
+            self._token_expiry[token] = expiry
+    
+    def is_blacklisted(self, token: str) -> bool:
+        """
+        Check if token is blacklisted.
+        
+        Args:
+            token: JWT token to check
+            
+        Returns:
+            bool: True if token is blacklisted
+        """
+        with self._lock:
+            return token in self._blacklisted_tokens
+    
+    def cleanup_expired(self) -> None:
+        """Remove expired tokens from blacklist."""
+        now = datetime.utcnow()
+        with self._lock:
+            expired_tokens = [
+                token for token, expiry in self._token_expiry.items()
+                if expiry <= now
+            ]
+            for token in expired_tokens:
+                self._blacklisted_tokens.discard(token)
+                self._token_expiry.pop(token, None)
+
+
+class RateLimiter:
+    """
+    Enhanced in-memory rate limiter for API endpoints.
+    In production, should use Redis or similar external store.
+    """
+    
+    def __init__(self):
+        """Initialize rate limiter."""
+        self._requests: Dict[str, deque] = defaultdict(deque)
+        self._lock = threading.Lock()
+    
+    def is_allowed(
+        self, 
+        identifier: str, 
+        max_requests: int = None,
+        window_minutes: int = 1
+    ) -> tuple[bool, Dict[str, Any]]:
+        """
+        Check if request is allowed under rate limit.
+        
+        Args:
+            identifier: Unique identifier (IP, user_id, etc.)
+            max_requests: Maximum requests allowed
+            window_minutes: Time window in minutes
+            
+        Returns:
+            tuple: (is_allowed, rate_limit_info)
+        """
+        max_requests = max_requests or settings.RATE_LIMIT_PER_MINUTE
+        window_seconds = window_minutes * 60
+        now = time.time()
+        cutoff = now - window_seconds
+        
+        with self._lock:
+            # Clean old requests
+            request_times = self._requests[identifier]
+            while request_times and request_times[0] < cutoff:
+                request_times.popleft()
+            
+            current_count = len(request_times)
+            
+            if current_count >= max_requests:
+                # Rate limit exceeded
+                oldest_request = request_times[0] if request_times else now
+                reset_time = oldest_request + window_seconds
+                
+                return False, {
+                    "allowed": False,
+                    "current_requests": current_count,
+                    "max_requests": max_requests,
+                    "window_minutes": window_minutes,
+                    "reset_at": reset_time,
+                    "retry_after": max(0, reset_time - now)
+                }
+            
+            # Allow request and record it
+            request_times.append(now)
+            
+            return True, {
+                "allowed": True,
+                "current_requests": current_count + 1,
+                "max_requests": max_requests,
+                "window_minutes": window_minutes,
+                "remaining_requests": max_requests - current_count - 1
+            }
+
+
+class SessionManager:
+    """
+    Enhanced session management for tracking active user sessions.
+    """
+    
+    def __init__(self):
+        """Initialize session manager."""
+        self._active_sessions: Dict[str, Dict[str, Any]] = {}
+        self._user_sessions: Dict[int, Set[str]] = defaultdict(set)
+        self._lock = threading.Lock()
+    
+    def create_session(
+        self, 
+        user_id: int, 
+        ip_address: str,
+        user_agent: str = None
+    ) -> str:
+        """
+        Create a new user session.
+        
+        Args:
+            user_id: User ID
+            ip_address: Client IP address
+            user_agent: Client user agent
+            
+        Returns:
+            str: Session ID
+        """
+        session_id = secrets.token_urlsafe(32)
+        session_data = {
+            "user_id": user_id,
+            "ip_address": ip_address,
+            "user_agent": user_agent,
+            "created_at": datetime.utcnow(),
+            "last_activity": datetime.utcnow(),
+            "is_active": True
+        }
+        
+        with self._lock:
+            self._active_sessions[session_id] = session_data
+            self._user_sessions[user_id].add(session_id)
+        
+        return session_id
+    
+    def update_session_activity(self, session_id: str) -> bool:
+        """
+        Update session last activity.
+        
+        Args:
+            session_id: Session ID
+            
+        Returns:
+            bool: True if session updated successfully
+        """
+        with self._lock:
+            if session_id in self._active_sessions:
+                self._active_sessions[session_id]["last_activity"] = datetime.utcnow()
+                return True
+            return False
+    
+    def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get session data.
+        
+        Args:
+            session_id: Session ID
+            
+        Returns:
+            dict: Session data or None
+        """
+        with self._lock:
+            return self._active_sessions.get(session_id)
+    
+    def invalidate_session(self, session_id: str) -> bool:
+        """
+        Invalidate a specific session.
+        
+        Args:
+            session_id: Session ID
+            
+        Returns:
+            bool: True if session invalidated successfully
+        """
+        with self._lock:
+            if session_id in self._active_sessions:
+                session_data = self._active_sessions[session_id]
+                user_id = session_data["user_id"]
+                
+                # Remove from active sessions
+                del self._active_sessions[session_id]
+                
+                # Remove from user sessions
+                self._user_sessions[user_id].discard(session_id)
+                
+                return True
+            return False
+    
+    def invalidate_user_sessions(self, user_id: int, except_session: str = None) -> int:
+        """
+        Invalidate all sessions for a user.
+        
+        Args:
+            user_id: User ID
+            except_session: Session ID to keep active
+            
+        Returns:
+            int: Number of sessions invalidated
+        """
+        invalidated_count = 0
+        
+        with self._lock:
+            session_ids = self._user_sessions[user_id].copy()
+            
+            for session_id in session_ids:
+                if except_session and session_id == except_session:
+                    continue
+                
+                if self.invalidate_session(session_id):
+                    invalidated_count += 1
+        
+        return invalidated_count
+    
+    def cleanup_expired_sessions(self, max_idle_hours: int = 24) -> int:
+        """
+        Remove expired sessions.
+        
+        Args:
+            max_idle_hours: Maximum idle time in hours
+            
+        Returns:
+            int: Number of sessions cleaned up
+        """
+        cutoff_time = datetime.utcnow() - timedelta(hours=max_idle_hours)
+        expired_sessions = []
+        
+        with self._lock:
+            for session_id, session_data in self._active_sessions.items():
+                if session_data["last_activity"] < cutoff_time:
+                    expired_sessions.append(session_id)
+            
+            for session_id in expired_sessions:
+                self.invalidate_session(session_id)
+        
+        return len(expired_sessions)
 
 
 class SecurityManager:
     """
-    Centralized security manager for CEMS application.
-    Handles password hashing, JWT tokens, and security utilities.
+    Enhanced centralized security manager for CEMS application.
+    Handles password hashing, JWT tokens, sessions, and security utilities.
     """
     
     def __init__(self):
         """Initialize security manager with configuration."""
-        self.algorithm = settings.ALGORITHM
+        self.algorithm = getattr(settings, 'ALGORITHM', 'HS256')
         self.secret_key = settings.SECRET_KEY
-        self.access_token_expire_minutes = settings.ACCESS_TOKEN_EXPIRE_MINUTES
-        self.refresh_token_expire_days = settings.REFRESH_TOKEN_EXPIRE_DAYS
+        self.access_token_expire_minutes = getattr(settings, 'ACCESS_TOKEN_EXPIRE_MINUTES', 30)
+        self.refresh_token_expire_days = getattr(settings, 'REFRESH_TOKEN_EXPIRE_DAYS', 7)
+        
+        # Initialize components
+        self.token_blacklist = TokenBlacklist()
+        self.rate_limiter = RateLimiter()
+        self.session_manager = SessionManager()
+        
+        # Password policy
+        self.password_min_length = getattr(settings, 'PASSWORD_MIN_LENGTH', 8)
+        self.password_max_length = getattr(settings, 'PASSWORD_MAX_LENGTH', 128)
+        self.password_require_upper = getattr(settings, 'PASSWORD_REQUIRE_UPPERCASE', True)
+        self.password_require_lower = getattr(settings, 'PASSWORD_REQUIRE_LOWERCASE', True)
+        self.password_require_digit = getattr(settings, 'PASSWORD_REQUIRE_DIGIT', True)
+        self.password_require_special = getattr(settings, 'PASSWORD_REQUIRE_SPECIAL', True)
     
     # Password handling methods
     def get_password_hash(self, password: str) -> str:
@@ -71,38 +359,53 @@ class SecurityManager:
     
     def check_password_strength(self, password: str) -> Dict[str, Any]:
         """
-        Check password strength and return validation result.
+        Enhanced password strength validation.
         
         Args:
             password: Password to validate
             
         Returns:
-            dict: Validation result with strength score and requirements
+            dict: Validation result with detailed feedback
         """
         result = {
             "is_valid": False,
             "score": 0,
-            "requirements_met": {},
-            "suggestions": []
+            "max_score": 8,
+            "strength": "weak",
+            "requirements_met": {
+                "min_length": False,
+                "max_length": False,
+                "has_lowercase": False,
+                "has_uppercase": False,
+                "has_digit": False,
+                "has_special": False,
+                "no_common_patterns": False,
+                "no_repeated_chars": False
+            },
+            "suggestions": [],
+            "estimated_crack_time": "seconds"
         }
         
         if not password:
             result["suggestions"].append("Password is required")
             return result
         
-        # Length requirement
-        length_req = len(password) >= settings.PASSWORD_MIN_LENGTH
-        result["requirements_met"]["min_length"] = length_req
-        if length_req:
-            result["score"] += 1
-        else:
-            result["suggestions"].append(f"Password must be at least {settings.PASSWORD_MIN_LENGTH} characters long")
+        # Length validation
+        length_req = self.password_min_length <= len(password) <= self.password_max_length
+        result["requirements_met"]["min_length"] = len(password) >= self.password_min_length
+        result["requirements_met"]["max_length"] = len(password) <= self.password_max_length
         
-        # Character type requirements
+        if not result["requirements_met"]["min_length"]:
+            result["suggestions"].append(f"Password must be at least {self.password_min_length} characters")
+        
+        if not result["requirements_met"]["max_length"]:
+            result["suggestions"].append(f"Password must be no more than {self.password_max_length} characters")
+        
+        # Character type validation
         has_lower = any(c.islower() for c in password)
         has_upper = any(c.isupper() for c in password)
         has_digit = any(c.isdigit() for c in password)
-        has_special = any(c in "!@#$%^&*()_+-=[]{}|;':\",./<>?" for c in password)
+        has_special = any(c in "!@#$%^&*()_+-=[]{}|;:,.<>?" for c in password)
         
         result["requirements_met"].update({
             "has_lowercase": has_lower,
@@ -114,46 +417,94 @@ class SecurityManager:
         # Score calculation
         if has_lower:
             result["score"] += 1
-        else:
+        elif self.password_require_lower:
             result["suggestions"].append("Include at least one lowercase letter")
         
         if has_upper:
             result["score"] += 1
-        else:
+        elif self.password_require_upper:
             result["suggestions"].append("Include at least one uppercase letter")
         
         if has_digit:
             result["score"] += 1
-        else:
+        elif self.password_require_digit:
             result["suggestions"].append("Include at least one number")
         
         if has_special:
             result["score"] += 1
-        else:
-            result["suggestions"].append("Include at least one special character")
+        elif self.password_require_special:
+            result["suggestions"].append("Include at least one special character (!@#$%^&*)")
         
-        # Common passwords check (basic implementation)
-        common_passwords = ["password", "123456", "password123", "admin", "user"]
-        if password.lower() in common_passwords:
-            result["suggestions"].append("Avoid common passwords")
-            result["score"] -= 1
+        # Length bonus
+        if len(password) >= 12:
+            result["score"] += 1
+        
+        if len(password) >= 16:
+            result["score"] += 1
+        
+        # Pattern analysis
+        # Check for repeated characters (more than 2 consecutive)
+        repeated_pattern = re.search(r'(.)\1{2,}', password)
+        if not repeated_pattern:
+            result["score"] += 1
+            result["requirements_met"]["no_repeated_chars"] = True
+        else:
+            result["suggestions"].append("Avoid repeated characters")
+        
+        # Check for common patterns
+        common_patterns = [
+            r'123+', r'abc+', r'qwe+', r'password', r'admin', 
+            r'user', r'login', r'welcome', r'secret'
+        ]
+        
+        has_common_pattern = any(
+            re.search(pattern, password.lower()) for pattern in common_patterns
+        )
+        
+        if not has_common_pattern:
+            result["score"] += 1
+            result["requirements_met"]["no_common_patterns"] = True
+        else:
+            result["suggestions"].append("Avoid common words and patterns")
+        
+        # Determine strength level
+        if result["score"] >= 7:
+            result["strength"] = "very_strong"
+            result["estimated_crack_time"] = "centuries"
+        elif result["score"] >= 6:
+            result["strength"] = "strong"
+            result["estimated_crack_time"] = "years"
+        elif result["score"] >= 4:
+            result["strength"] = "moderate"
+            result["estimated_crack_time"] = "days"
+        elif result["score"] >= 2:
+            result["strength"] = "weak"
+            result["estimated_crack_time"] = "hours"
+        else:
+            result["strength"] = "very_weak"
+            result["estimated_crack_time"] = "seconds"
         
         # Overall validation
+        required_score = 4  # Minimum acceptable score
         result["is_valid"] = (
-            length_req and has_lower and has_upper and 
-            has_digit and result["score"] >= 4
+            length_req and 
+            result["score"] >= required_score and
+            (not self.password_require_lower or has_lower) and
+            (not self.password_require_upper or has_upper) and
+            (not self.password_require_digit or has_digit) and
+            (not self.password_require_special or has_special)
         )
         
         return result
     
-    # JWT Token methods
+    # Enhanced JWT Token methods
     def create_access_token(
         self, 
         data: Dict[str, Any], 
         expires_delta: Optional[timedelta] = None
     ) -> str:
         """
-        Create JWT access token.
+        Create JWT access token with enhanced security.
         
         Args:
             data: Data to encode in token
@@ -172,7 +523,8 @@ class SecurityManager:
         to_encode.update({
             "exp": expire,
             "iat": datetime.utcnow(),
-            "type": "access"
+            "type": "access",
+            "jti": secrets.token_urlsafe(16)  # JWT ID for tracking
         })
         
         encoded_jwt = jwt.encode(to_encode, self.secret_key, algorithm=self.algorithm)
@@ -184,7 +536,7 @@ class SecurityManager:
         expires_delta: Optional[timedelta] = None
     ) -> str:
         """
-        Create JWT refresh token.
+        Create JWT refresh token with enhanced security.
         
         Args:
             data: Data to encode in token
@@ -203,7 +555,8 @@ class SecurityManager:
         to_encode.update({
             "exp": expire,
             "iat": datetime.utcnow(),
-            "type": "refresh"
+            "type": "refresh",
+            "jti": secrets.token_urlsafe(16)  # JWT ID for tracking
         })
         
         encoded_jwt = jwt.encode(to_encode, self.secret_key, algorithm=self.algorithm)
@@ -211,7 +564,7 @@ class SecurityManager:
     
     def verify_token(self, token: str, token_type: str = "access") -> Dict[str, Any]:
         """
-        Verify and decode JWT token.
+        Enhanced token verification with blacklist checking.
         
         Args:
             token: JWT token to verify
@@ -224,6 +577,13 @@ class SecurityManager:
             AuthenticationException: If token is invalid
             TokenExpiredException: If token is expired
         """
+        # Check blacklist first
+        if self.token_blacklist.is_blacklisted(token):
+            raise AuthenticationException(
+                message="Token has been revoked",
+                details={"reason": "blacklisted"}
+            )
+        
         try:
             payload = jwt.decode(token, self.secret_key, algorithms=[self.algorithm])
             
@@ -252,9 +612,34 @@ class SecurityManager:
                     details={"jwt_error": str(e)}
                 )
     
+    def revoke_token(self, token: str) -> bool:
+        """
+        Revoke (blacklist) a token.
+        
+        Args:
+            token: JWT token to revoke
+            
+        Returns:
+            bool: True if token was revoked successfully
+        """
+        try:
+            # Decode token to get expiry (without verification for blacklisting)
+            unverified_payload = jwt.get_unverified_claims(token)
+            exp_timestamp = unverified_payload.get("exp")
+            
+            if exp_timestamp:
+                expiry = datetime.fromtimestamp(exp_timestamp)
+                self.token_blacklist.add_token(token, expiry)
+                return True
+            
+        except Exception:
+            pass
+        
+        return False
+    
     def create_reset_token(self, user_id: int) -> str:
         """
-        Create password reset token.
+        Create password reset token with enhanced security.
         
         Args:
             user_id: User ID for password reset
@@ -265,7 +650,8 @@ class SecurityManager:
         data = {
             "user_id": user_id,
             "purpose": "password_reset",
-            "exp": datetime.utcnow() + timedelta(hours=1)  # 1 hour expiry
+            "exp": datetime.utcnow() + timedelta(hours=1),  # 1 hour expiry
+            "jti": secrets.token_urlsafe(16)
         }
         return jwt.encode(data, self.secret_key, algorithm=self.algorithm)
     
@@ -429,7 +815,7 @@ class SecurityManager:
             # Fallback implementation without pyotp
             return False
     
-    def generate_backup_codes(self, count: int = 10) -> list[str]:
+    def generate_backup_codes(self, count: int = 10) -> List[str]:
         """
         Generate backup codes for 2FA recovery.
         
@@ -448,6 +834,53 @@ class SecurityManager:
             codes.append(formatted_code)
         
         return codes
+    
+    # Rate limiting methods
+    def check_rate_limit(
+        self, 
+        identifier: str, 
+        max_requests: int = None,
+        window_minutes: int = 1
+    ) -> Dict[str, Any]:
+        """
+        Check rate limit for identifier.
+        
+        Args:
+            identifier: Unique identifier (IP, user_id, etc.)
+            max_requests: Maximum requests allowed
+            window_minutes: Time window in minutes
+            
+        Returns:
+            dict: Rate limit information
+            
+        Raises:
+            RateLimitExceededException: If rate limit is exceeded
+        """
+        is_allowed, rate_info = self.rate_limiter.is_allowed(
+            identifier, max_requests, window_minutes
+        )
+        
+        if not is_allowed:
+            raise RateLimitExceededException(
+                details=rate_info
+            )
+        
+        return rate_info
+    
+    # Cleanup methods
+    def cleanup_expired_data(self) -> Dict[str, int]:
+        """
+        Cleanup expired tokens and sessions.
+        
+        Returns:
+            dict: Cleanup statistics
+        """
+        self.token_blacklist.cleanup_expired()
+        expired_sessions = self.session_manager.cleanup_expired_sessions()
+        
+        return {
+            "expired_sessions_cleaned": expired_sessions
+        }
 
 
 # Global security manager instance
@@ -494,186 +927,51 @@ def generate_api_key(prefix: str = "cems") -> str:
     return security_manager.generate_api_key(prefix)
 
 
-# Rate limiting utilities
-class RateLimiter:
+def check_rate_limit(identifier: str, max_requests: int = None, window_minutes: int = 1) -> Dict[str, Any]:
+    """Check rate limit for identifier."""
+    return security_manager.check_rate_limit(identifier, max_requests, window_minutes)
+
+
+# Additional security utilities
+def generate_otp(length: int = 6) -> str:
     """
-    Simple in-memory rate limiter for API endpoints.
-    In production, should use Redis or similar external store.
-    """
-    
-    def __init__(self):
-        """Initialize rate limiter."""
-        self.requests = {}  # {key: [(timestamp, count), ...]}
-        self.cleanup_interval = 3600  # 1 hour
-        self.last_cleanup = datetime.utcnow()
-    
-    def is_allowed(
-        self, 
-        key: str, 
-        limit: int, 
-        window: int = 60,
-        burst: int = None
-    ) -> tuple[bool, Dict[str, Any]]:
-        """
-        Check if request is allowed under rate limit.
-        
-        Args:
-            key: Unique identifier for rate limiting
-            limit: Number of requests allowed per window
-            window: Time window in seconds
-            burst: Burst limit (optional)
-            
-        Returns:
-            tuple: (is_allowed, rate_limit_info)
-        """
-        now = datetime.utcnow()
-        
-        # Cleanup old entries
-        if (now - self.last_cleanup).seconds > self.cleanup_interval:
-            self._cleanup()
-        
-        # Get current window start
-        window_start = now - timedelta(seconds=window)
-        
-        # Initialize or get existing requests for this key
-        if key not in self.requests:
-            self.requests[key] = []
-        
-        # Remove requests outside current window
-        self.requests[key] = [
-            (timestamp, count) for timestamp, count in self.requests[key]
-            if timestamp > window_start
-        ]
-        
-        # Count current requests
-        current_count = sum(count for _, count in self.requests[key])
-        
-        # Check limits
-        is_allowed = current_count < limit
-        if burst and current_count < burst:
-            is_allowed = True
-        
-        # Record this request if allowed
-        if is_allowed:
-            self.requests[key].append((now, 1))
-        
-        # Prepare response info
-        rate_limit_info = {
-            "limit": limit,
-            "remaining": max(0, limit - current_count - (1 if is_allowed else 0)),
-            "reset": int((now + timedelta(seconds=window)).timestamp()),
-            "window": window
-        }
-        
-        return is_allowed, rate_limit_info
-    
-    def _cleanup(self):
-        """Clean up old rate limit entries."""
-        cutoff = datetime.utcnow() - timedelta(hours=2)
-        
-        for key in list(self.requests.keys()):
-            self.requests[key] = [
-                (timestamp, count) for timestamp, count in self.requests[key]
-                if timestamp > cutoff
-            ]
-            
-            # Remove empty entries
-            if not self.requests[key]:
-                del self.requests[key]
-        
-        self.last_cleanup = datetime.utcnow()
-
-
-# Global rate limiter instance
-rate_limiter = RateLimiter()
-
-
-# Security headers utility
-def get_security_headers() -> Dict[str, str]:
-    """
-    Get recommended security headers.
-    
-    Returns:
-        dict: Security headers for HTTP responses
-    """
-    return {
-        "X-Content-Type-Options": "nosniff",
-        "X-Frame-Options": "DENY",
-        "X-XSS-Protection": "1; mode=block",
-        "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
-        "Content-Security-Policy": "default-src 'self'",
-        "Referrer-Policy": "strict-origin-when-cross-origin",
-        "Permissions-Policy": "geolocation=(), microphone=(), camera=()"
-    }
-
-
-# Input sanitization utilities
-def sanitize_input(text: str, max_length: int = 1000) -> str:
-    """
-    Sanitize user input to prevent injection attacks.
+    Generate numeric OTP (One-Time Password).
     
     Args:
-        text: Input text to sanitize
-        max_length: Maximum allowed length
+        length: Length of OTP
         
     Returns:
-        str: Sanitized text
+        str: Generated OTP
     """
-    if not isinstance(text, str):
-        text = str(text)
-    
-    # Truncate to max length
-    text = text[:max_length]
-    
-    # Remove null bytes
-    text = text.replace('\x00', '')
-    
-    # Basic HTML entity encoding for common dangerous characters
-    dangerous_chars = {
-        '<': '&lt;',
-        '>': '&gt;',
-        '"': '&quot;',
-        "'": '&#x27;',
-        '&': '&amp;'
-    }
-    
-    for char, entity in dangerous_chars.items():
-        text = text.replace(char, entity)
-    
-    return text.strip()
+    return ''.join(secrets.choice('0123456789') for _ in range(length))
 
 
-def validate_email_format(email: str) -> bool:
+def mask_sensitive_data(data: str, visible_chars: int = 4) -> str:
     """
-    Validate email format.
+    Mask sensitive data for logging/display.
     
     Args:
-        email: Email to validate
+        data: Sensitive data to mask
+        visible_chars: Number of characters to show
         
     Returns:
-        bool: True if email format is valid
+        str: Masked data
     """
-    import re
+    if len(data) <= visible_chars:
+        return '*' * len(data)
     
-    pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-    return bool(re.match(pattern, email))
+    return data[:visible_chars] + '*' * (len(data) - visible_chars)
 
 
-def validate_phone_format(phone: str) -> bool:
+def secure_compare(a: str, b: str) -> bool:
     """
-    Validate phone number format.
+    Secure string comparison to prevent timing attacks.
     
     Args:
-        phone: Phone number to validate
+        a: First string
+        b: Second string
         
     Returns:
-        bool: True if phone format is valid
+        bool: True if strings are equal
     """
-    import re
-    
-    # Remove common separators
-    cleaned = re.sub(r'[\s\-\(\)]+', '', phone)
-    
-    # Check if it's a valid international format
-    pattern = r'^\+?[1-9]\d{1,14}$'
-    return bool(re.match(pattern, cleaned))
+    return hmac.compare_digest(a.encode(), b.encode())

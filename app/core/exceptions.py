@@ -1,6 +1,6 @@
 """
 Module: exceptions
-Purpose: Custom exception classes for CEMS application
+Purpose: Enhanced custom exception classes for CEMS application with security features
 Author: CEMS Development Team
 Date: 2024
 """
@@ -48,7 +48,7 @@ class AuthenticationException(CEMSException):
     def __init__(
         self,
         message: str = "Authentication failed",
-        error_code: str = ErrorCode.INVALID_CREDENTIALS,
+        error_code: str = "AUTH_001",  # ErrorCode.INVALID_CREDENTIALS
         details: Optional[Dict[str, Any]] = None
     ):
         super().__init__(
@@ -66,7 +66,7 @@ class InvalidCredentialsException(AuthenticationException):
     def __init__(self, details: Optional[Dict[str, Any]] = None):
         super().__init__(
             message="Invalid username or password",
-            error_code=ErrorCode.INVALID_CREDENTIALS,
+            error_code="AUTH_001",  # ErrorCode.INVALID_CREDENTIALS
             details=details
         )
 
@@ -77,8 +77,143 @@ class TokenExpiredException(AuthenticationException):
     def __init__(self, details: Optional[Dict[str, Any]] = None):
         super().__init__(
             message="Access token has expired",
-            error_code=ErrorCode.TOKEN_EXPIRED,
+            error_code="AUTH_002",  # ErrorCode.TOKEN_EXPIRED
             details=details
+        )
+
+
+class RefreshTokenException(AuthenticationException):
+    """Exception raised for refresh token errors."""
+    
+    def __init__(
+        self, 
+        message: str = "Refresh token is invalid or expired",
+        details: Optional[Dict[str, Any]] = None
+    ):
+        super().__init__(
+            message=message,
+            error_code="AUTH_005",  # ErrorCode.REFRESH_TOKEN_INVALID
+            details=details
+        )
+
+
+class TokenRevokedException(AuthenticationException):
+    """Exception raised when token has been revoked/blacklisted."""
+    
+    def __init__(self, details: Optional[Dict[str, Any]] = None):
+        super().__init__(
+            message="Token has been revoked",
+            error_code="AUTH_006",  # ErrorCode.TOKEN_REVOKED
+            details=details
+        )
+
+
+class SessionExpiredException(AuthenticationException):
+    """Exception raised when user session has expired."""
+    
+    def __init__(self, details: Optional[Dict[str, Any]] = None):
+        super().__init__(
+            message="Session has expired. Please login again",
+            error_code="AUTH_007",  # ErrorCode.SESSION_EXPIRED
+            details=details
+        )
+
+
+class InvalidSessionException(AuthenticationException):
+    """Exception raised for invalid session."""
+    
+    def __init__(self, details: Optional[Dict[str, Any]] = None):
+        super().__init__(
+            message="Invalid session",
+            error_code="AUTH_008",  # ErrorCode.INVALID_SESSION
+            details=details
+        )
+
+
+class AccountLockedException(AuthenticationException):
+    """Exception raised when user account is locked due to failed attempts."""
+    
+    def __init__(
+        self, 
+        unlock_time: Optional[str] = None,
+        details: Optional[Dict[str, Any]] = None
+    ):
+        message = "Account is temporarily locked due to multiple failed login attempts"
+        if unlock_time:
+            message += f". Try again after {unlock_time}"
+        
+        super().__init__(
+            message=message,
+            error_code="AUTH_009",  # ErrorCode.ACCOUNT_LOCKED
+            details=details or {"unlock_time": unlock_time}
+        )
+
+
+class TwoFactorRequiredException(AuthenticationException):
+    """Exception raised when 2FA is required."""
+    
+    def __init__(self, details: Optional[Dict[str, Any]] = None):
+        super().__init__(
+            message="Two-factor authentication is required",
+            error_code="AUTH_010",  # ErrorCode.TWO_FACTOR_REQUIRED
+            details=details
+        )
+
+
+class Invalid2FATokenException(AuthenticationException):
+    """Exception raised for invalid 2FA token."""
+    
+    def __init__(self, details: Optional[Dict[str, Any]] = None):
+        super().__init__(
+            message="Invalid two-factor authentication token",
+            error_code="AUTH_011",  # ErrorCode.INVALID_2FA_TOKEN
+            details=details
+        )
+
+
+class PasswordStrengthException(CEMSException):
+    """Exception raised when password doesn't meet strength requirements."""
+    
+    def __init__(
+        self, 
+        requirements: Optional[Dict[str, Any]] = None,
+        details: Optional[Dict[str, Any]] = None
+    ):
+        message = "Password does not meet strength requirements"
+        if requirements and requirements.get("suggestions"):
+            suggestions = requirements["suggestions"][:3]  # Limit to 3 suggestions
+            message += f": {', '.join(suggestions)}"
+        
+        super().__init__(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            message=message,
+            error_code="AUTH_012",  # ErrorCode.WEAK_PASSWORD
+            details=details or {"requirements": requirements}
+        )
+
+
+class RateLimitExceededException(CEMSException):
+    """Exception raised when rate limit is exceeded."""
+    
+    def __init__(
+        self, 
+        retry_after: Optional[float] = None,
+        details: Optional[Dict[str, Any]] = None
+    ):
+        message = "Rate limit exceeded. Too many requests"
+        if retry_after:
+            message += f". Try again in {retry_after:.1f} seconds"
+        
+        headers = {}
+        if retry_after:
+            headers["Retry-After"] = str(int(retry_after))
+        
+        super().__init__(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            message=message,
+            error_code="AUTH_013",  # ErrorCode.RATE_LIMIT_EXCEEDED
+            details=details,
+            headers=headers
         )
 
 
@@ -93,7 +228,7 @@ class InsufficientPermissionsException(CEMSException):
         super().__init__(
             status_code=status.HTTP_403_FORBIDDEN,
             message=f"Insufficient permissions. Required: {required_permission}",
-            error_code=ErrorCode.INSUFFICIENT_PERMISSIONS,
+            error_code="AUTH_003",  # ErrorCode.INSUFFICIENT_PERMISSIONS
             details=details or {"required_permission": required_permission}
         )
 
@@ -104,7 +239,40 @@ class AccountSuspendedException(AuthenticationException):
     def __init__(self, details: Optional[Dict[str, Any]] = None):
         super().__init__(
             message="User account is suspended",
-            error_code=ErrorCode.ACCOUNT_SUSPENDED,
+            error_code="AUTH_004",  # ErrorCode.ACCOUNT_SUSPENDED
+            details=details
+        )
+
+
+class AccountDisabledException(AuthenticationException):
+    """Exception raised when user account is disabled."""
+    
+    def __init__(self, details: Optional[Dict[str, Any]] = None):
+        super().__init__(
+            message="User account is disabled",
+            error_code="AUTH_014",  # ErrorCode.ACCOUNT_DISABLED
+            details=details
+        )
+
+
+class EmailNotVerifiedException(AuthenticationException):
+    """Exception raised when user email is not verified."""
+    
+    def __init__(self, details: Optional[Dict[str, Any]] = None):
+        super().__init__(
+            message="Email address is not verified. Please check your email and verify your account",
+            error_code="AUTH_015",  # ErrorCode.EMAIL_NOT_VERIFIED
+            details=details
+        )
+
+
+class PasswordResetRequiredException(AuthenticationException):
+    """Exception raised when password reset is required."""
+    
+    def __init__(self, details: Optional[Dict[str, Any]] = None):
+        super().__init__(
+            message="Password reset is required",
+            error_code="AUTH_016",  # ErrorCode.PASSWORD_RESET_REQUIRED
             details=details
         )
 
@@ -117,7 +285,7 @@ class ValidationException(CEMSException):
     def __init__(
         self,
         message: str,
-        error_code: str = ErrorCode.INVALID_INPUT,
+        error_code: str = "VAL_001",  # ErrorCode.INVALID_INPUT
         details: Optional[Dict[str, Any]] = None
     ):
         super().__init__(
@@ -134,8 +302,49 @@ class RequiredFieldMissingException(ValidationException):
     def __init__(self, field_name: str, details: Optional[Dict[str, Any]] = None):
         super().__init__(
             message=f"Required field '{field_name}' is missing",
-            error_code=ErrorCode.REQUIRED_FIELD_MISSING,
+            error_code="VAL_002",  # ErrorCode.REQUIRED_FIELD_MISSING
             details=details or {"field_name": field_name}
+        )
+
+
+class InvalidFormatException(ValidationException):
+    """Exception raised for invalid data format."""
+    
+    def __init__(
+        self, 
+        field_name: str, 
+        expected_format: str,
+        details: Optional[Dict[str, Any]] = None
+    ):
+        super().__init__(
+            message=f"Invalid format for '{field_name}'. Expected: {expected_format}",
+            error_code="VAL_003",  # ErrorCode.INVALID_FORMAT
+            details=details or {
+                "field_name": field_name,
+                "expected_format": expected_format
+            }
+        )
+
+
+class InvalidEmailException(ValidationException):
+    """Exception raised for invalid email format."""
+    
+    def __init__(self, email: str, details: Optional[Dict[str, Any]] = None):
+        super().__init__(
+            message=f"Invalid email format: {email}",
+            error_code="VAL_004",  # ErrorCode.INVALID_EMAIL
+            details=details or {"email": email}
+        )
+
+
+class InvalidPhoneException(ValidationException):
+    """Exception raised for invalid phone number format."""
+    
+    def __init__(self, phone: str, details: Optional[Dict[str, Any]] = None):
+        super().__init__(
+            message=f"Invalid phone number format: {phone}",
+            error_code="VAL_005",  # ErrorCode.INVALID_PHONE
+            details=details or {"phone": phone}
         )
 
 
@@ -145,7 +354,7 @@ class InvalidCurrencyCodeException(ValidationException):
     def __init__(self, currency_code: str, details: Optional[Dict[str, Any]] = None):
         super().__init__(
             message=f"Invalid currency code: {currency_code}",
-            error_code=ErrorCode.INVALID_CURRENCY_CODE,
+            error_code="VAL_006",  # ErrorCode.INVALID_CURRENCY_CODE
             details=details or {"currency_code": currency_code}
         )
 
@@ -154,15 +363,57 @@ class InvalidAmountException(ValidationException):
     """Exception raised for invalid amount values."""
     
     def __init__(
-        self,
-        amount: Any,
-        reason: str = "Invalid amount format or value",
+        self, 
+        amount: Any, 
+        reason: str = "Invalid amount",
         details: Optional[Dict[str, Any]] = None
     ):
         super().__init__(
             message=f"{reason}: {amount}",
-            error_code=ErrorCode.INVALID_AMOUNT,
-            details=details or {"amount": str(amount), "reason": reason}
+            error_code="VAL_007",  # ErrorCode.INVALID_AMOUNT
+            details=details or {"amount": amount, "reason": reason}
+        )
+
+
+class ValueTooSmallException(ValidationException):
+    """Exception raised when value is below minimum."""
+    
+    def __init__(
+        self, 
+        field_name: str, 
+        value: Any, 
+        minimum: Any,
+        details: Optional[Dict[str, Any]] = None
+    ):
+        super().__init__(
+            message=f"{field_name} value {value} is below minimum {minimum}",
+            error_code="VAL_008",  # ErrorCode.VALUE_TOO_SMALL
+            details=details or {
+                "field_name": field_name,
+                "value": value,
+                "minimum": minimum
+            }
+        )
+
+
+class ValueTooLargeException(ValidationException):
+    """Exception raised when value exceeds maximum."""
+    
+    def __init__(
+        self, 
+        field_name: str, 
+        value: Any, 
+        maximum: Any,
+        details: Optional[Dict[str, Any]] = None
+    ):
+        super().__init__(
+            message=f"{field_name} value {value} exceeds maximum {maximum}",
+            error_code="VAL_009",  # ErrorCode.VALUE_TOO_LARGE
+            details=details or {
+                "field_name": field_name,
+                "value": value,
+                "maximum": maximum
+            }
         )
 
 
@@ -186,21 +437,21 @@ class BusinessLogicException(CEMSException):
 
 
 class InsufficientBalanceException(BusinessLogicException):
-    """Exception raised when account balance is insufficient."""
+    """Exception raised when account has insufficient balance."""
     
     def __init__(
         self,
         available_balance: float,
-        requested_amount: float,
+        required_amount: float,
         currency: str,
         details: Optional[Dict[str, Any]] = None
     ):
         super().__init__(
-            message=f"Insufficient balance. Available: {available_balance} {currency}, Requested: {requested_amount} {currency}",
-            error_code=ErrorCode.INSUFFICIENT_BALANCE,
+            message=f"Insufficient balance. Available: {available_balance} {currency}, Required: {required_amount} {currency}",
+            error_code="BIZ_001",  # ErrorCode.INSUFFICIENT_BALANCE
             details=details or {
                 "available_balance": available_balance,
-                "requested_amount": requested_amount,
+                "required_amount": required_amount,
                 "currency": currency
             }
         )
@@ -217,7 +468,7 @@ class ExchangeRateNotAvailableException(BusinessLogicException):
     ):
         super().__init__(
             message=f"Exchange rate not available for {from_currency} to {to_currency}",
-            error_code=ErrorCode.RATE_NOT_AVAILABLE,
+            error_code="BIZ_002",  # ErrorCode.RATE_NOT_AVAILABLE
             details=details or {
                 "from_currency": from_currency,
                 "to_currency": to_currency
@@ -238,7 +489,7 @@ class TransactionLimitExceededException(BusinessLogicException):
     ):
         super().__init__(
             message=f"{limit_type} limit exceeded. Limit: {limit_amount} {currency}, Requested: {requested_amount} {currency}",
-            error_code=ErrorCode.TRANSACTION_LIMIT_EXCEEDED,
+            error_code="BIZ_003",  # ErrorCode.TRANSACTION_LIMIT_EXCEEDED
             details=details or {
                 "limit_type": limit_type,
                 "limit_amount": limit_amount,
@@ -258,7 +509,7 @@ class DuplicateTransactionException(BusinessLogicException):
     ):
         super().__init__(
             message=f"Duplicate transaction detected: {transaction_reference}",
-            error_code=ErrorCode.DUPLICATE_TRANSACTION,
+            error_code="BIZ_004",  # ErrorCode.DUPLICATE_TRANSACTION
             details=details or {"transaction_reference": transaction_reference}
         )
 
@@ -274,10 +525,29 @@ class BranchClosedException(BusinessLogicException):
     ):
         super().__init__(
             message=f"Branch {branch_id} is closed for operations at {current_time}",
-            error_code=ErrorCode.BRANCH_CLOSED,
+            error_code="BIZ_005",  # ErrorCode.BRANCH_CLOSED
             details=details or {
                 "branch_id": branch_id,
                 "current_time": current_time
+            }
+        )
+
+
+class OperationNotAllowedException(BusinessLogicException):
+    """Exception raised when operation is not allowed in current state."""
+    
+    def __init__(
+        self,
+        operation: str,
+        reason: str,
+        details: Optional[Dict[str, Any]] = None
+    ):
+        super().__init__(
+            message=f"Operation '{operation}' not allowed: {reason}",
+            error_code="BIZ_006",  # ErrorCode.OPERATION_NOT_ALLOWED
+            details=details or {
+                "operation": operation,
+                "reason": reason
             }
         )
 
@@ -312,7 +582,7 @@ class DatabaseException(SystemException):
     ):
         super().__init__(
             message=f"Database error during {operation}",
-            error_code=ErrorCode.DATABASE_ERROR,
+            error_code="SYS_001",  # ErrorCode.DATABASE_ERROR
             details=details or {
                 "operation": operation,
                 "original_error": original_error
@@ -332,7 +602,7 @@ class ExternalAPIException(SystemException):
     ):
         super().__init__(
             message=f"External API error: {api_name}",
-            error_code=ErrorCode.EXTERNAL_API_ERROR,
+            error_code="SYS_002",  # ErrorCode.EXTERNAL_API_ERROR
             details=details or {
                 "api_name": api_name,
                 "status_code": status_code,
@@ -353,7 +623,7 @@ class FileUploadException(CEMSException):
         super().__init__(
             status_code=status.HTTP_400_BAD_REQUEST,
             message=f"File upload failed: {reason}",
-            error_code=ErrorCode.FILE_UPLOAD_ERROR,
+            error_code="SYS_003",  # ErrorCode.FILE_UPLOAD_ERROR
             details=details or {
                 "reason": reason,
                 "filename": filename
@@ -372,11 +642,26 @@ class NetworkException(SystemException):
     ):
         super().__init__(
             message=f"Network error during {operation}",
-            error_code=ErrorCode.NETWORK_ERROR,
+            error_code="SYS_004",  # ErrorCode.NETWORK_ERROR
             details=details or {
                 "operation": operation,
                 "original_error": original_error
             }
+        )
+
+
+class ServiceUnavailableException(SystemException):
+    """Exception raised when service is temporarily unavailable."""
+    
+    def __init__(
+        self,
+        service_name: str,
+        details: Optional[Dict[str, Any]] = None
+    ):
+        super().__init__(
+            message=f"Service temporarily unavailable: {service_name}",
+            error_code="SYS_005",  # ErrorCode.SERVICE_UNAVAILABLE
+            details=details or {"service_name": service_name}
         )
 
 
@@ -394,7 +679,7 @@ class ResourceNotFoundException(CEMSException):
         super().__init__(
             status_code=status.HTTP_404_NOT_FOUND,
             message=f"{resource_type} with ID '{resource_id}' not found",
-            error_code="RESOURCE_NOT_FOUND",
+            error_code="RES_001",  # ErrorCode.RESOURCE_NOT_FOUND
             details=details or {
                 "resource_type": resource_type,
                 "resource_id": resource_id
@@ -414,10 +699,30 @@ class ResourceConflictException(CEMSException):
         super().__init__(
             status_code=status.HTTP_409_CONFLICT,
             message=f"{resource_type} conflict: {conflict_reason}",
-            error_code="RESOURCE_CONFLICT",
+            error_code="RES_002",  # ErrorCode.RESOURCE_CONFLICT
             details=details or {
                 "resource_type": resource_type,
                 "conflict_reason": conflict_reason
+            }
+        )
+
+
+class ResourceAlreadyExistsException(CEMSException):
+    """Exception raised when trying to create a resource that already exists."""
+    
+    def __init__(
+        self,
+        resource_type: str,
+        identifier: str,
+        details: Optional[Dict[str, Any]] = None
+    ):
+        super().__init__(
+            status_code=status.HTTP_409_CONFLICT,
+            message=f"{resource_type} with identifier '{identifier}' already exists",
+            error_code="RES_003",  # ErrorCode.RESOURCE_ALREADY_EXISTS
+            details=details or {
+                "resource_type": resource_type,
+                "identifier": identifier
             }
         )
 
@@ -463,3 +768,69 @@ def handle_validation_error(field_errors: Dict[str, Any]) -> ValidationException
         message=f"Validation failed: {'; '.join(error_messages)}",
         details={"field_errors": field_errors}
     )
+
+
+def create_authentication_exception(
+    error_type: str,
+    details: Optional[Dict[str, Any]] = None
+) -> AuthenticationException:
+    """
+    Factory function to create appropriate authentication exception.
+    
+    Args:
+        error_type: Type of authentication error
+        details: Additional error details
+        
+    Returns:
+        AuthenticationException: Appropriate exception instance
+    """
+    error_map = {
+        "invalid_credentials": InvalidCredentialsException,
+        "token_expired": TokenExpiredException,
+        "refresh_token_invalid": RefreshTokenException,
+        "account_locked": AccountLockedException,
+        "account_suspended": AccountSuspendedException,
+        "account_disabled": AccountDisabledException,
+        "2fa_required": TwoFactorRequiredException,
+        "invalid_2fa": Invalid2FATokenException,
+        "session_expired": SessionExpiredException,
+        "email_not_verified": EmailNotVerifiedException,
+    }
+    
+    exception_class = error_map.get(error_type, AuthenticationException)
+    return exception_class(details=details)
+
+
+def create_validation_exception(
+    validation_type: str,
+    field_name: str = None,
+    value: Any = None,
+    details: Optional[Dict[str, Any]] = None
+) -> ValidationException:
+    """
+    Factory function to create appropriate validation exception.
+    
+    Args:
+        validation_type: Type of validation error
+        field_name: Name of the field with validation error
+        value: Invalid value
+        details: Additional error details
+        
+    Returns:
+        ValidationException: Appropriate exception instance
+    """
+    if validation_type == "required_field":
+        return RequiredFieldMissingException(field_name, details)
+    elif validation_type == "invalid_email":
+        return InvalidEmailException(value, details)
+    elif validation_type == "invalid_phone":
+        return InvalidPhoneException(value, details)
+    elif validation_type == "invalid_currency":
+        return InvalidCurrencyCodeException(value, details)
+    elif validation_type == "invalid_amount":
+        return InvalidAmountException(value, details=details)
+    else:
+        return ValidationException(
+            f"Validation failed for {field_name}: {value}",
+            details=details
+        )
