@@ -1,0 +1,268 @@
+# ===============================================
+# CEMS - Currency Exchange Management System
+# Docker Compose Configuration for Development
+# ===============================================
+
+version: '3.8'
+
+networks:
+  cems-dev-network:
+    driver: bridge
+    name: cems-dev-network
+
+volumes:
+  postgres_dev_data:
+    driver: local
+    name: cems_postgres_dev_data
+  redis_dev_data:
+    driver: local
+    name: cems_redis_dev_data
+
+services:
+  # ==================== DEVELOPMENT DATABASE ====================
+  postgres-dev:
+    image: postgres:15.5-alpine
+    container_name: cems_postgres_dev
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-cems_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cems_password}
+      POSTGRES_DB: ${POSTGRES_DB:-cems_db}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    volumes:
+      - postgres_dev_data:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - ./sql-dumps:/sql-dumps  # For importing/exporting data
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    networks:
+      - cems-dev-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cems_user} -d ${POSTGRES_DB:-cems_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ==================== DEVELOPMENT REDIS ====================
+  redis-dev:
+    image: redis:7.2-alpine
+    container_name: cems_redis_dev
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_dev_data:/data
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    networks:
+      - cems-dev-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # ==================== DEVELOPMENT APPLICATION ====================
+  app-dev:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: development
+    container_name: cems_app_dev
+    restart: unless-stopped
+    environment:
+      # Database Configuration
+      DATABASE_URL: postgresql://${POSTGRES_USER:-cems_user}:${POSTGRES_PASSWORD:-cems_password}@postgres-dev:5432/${POSTGRES_DB:-cems_db}
+      
+      # Redis Configuration
+      REDIS_URL: redis://redis-dev:6379/0
+      
+      # Application Configuration
+      APP_NAME: ${APP_NAME:-CEMS-DEV}
+      APP_VERSION: ${APP_VERSION:-1.0.0-dev}
+      DEBUG: ${DEBUG:-true}
+      ENVIRONMENT: development
+      
+      # Security (Development keys - NOT for production)
+      SECRET_KEY: ${SECRET_KEY:-dev-secret-key-change-me}
+      ALGORITHM: ${ALGORITHM:-HS256}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-120}
+      
+      # CORS (Permissive for development)
+      BACKEND_CORS_ORIGINS: ${BACKEND_CORS_ORIGINS:-["http://localhost:3000","http://localhost:8080","http://127.0.0.1:3000"]}
+      
+      # Admin User
+      FIRST_SUPERUSER: ${FIRST_SUPERUSER:-admin@cems.dev}
+      FIRST_SUPERUSER_PASSWORD: ${FIRST_SUPERUSER_PASSWORD:-dev123!}
+      
+      # Development Settings
+      LOG_LEVEL: ${LOG_LEVEL:-DEBUG}
+      RELOAD: ${RELOAD:-true}
+      
+      # Development Tools
+      PYTHONPATH: /app
+      PYTHONUNBUFFERED: 1
+      
+    volumes:
+      # Mount source code for hot reload
+      - .:/app
+      - ./logs:/app/logs
+      - ./uploads:/app/uploads
+      - ./tests:/app/tests
+    ports:
+      - "${APP_PORT:-8000}:8000"
+      - "${APP_DEBUG_PORT:-5678}:5678"  # For debugger
+    networks:
+      - cems-dev-network
+    depends_on:
+      postgres-dev:
+        condition: service_healthy
+      redis-dev:
+        condition: service_healthy
+    command: >
+      sh -c "
+        echo 'Waiting for database...' &&
+        python -c 'import time; time.sleep(5)' &&
+        echo 'Running database migrations...' &&
+        alembic upgrade head &&
+        echo 'Seeding initial data...' &&
+        python -m app.db.init_db &&
+        echo 'Starting development server...' &&
+        uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --log-level debug
+      "
+
+  # ==================== PGADMIN FOR DATABASE MANAGEMENT ====================
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: cems_pgadmin_dev
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@cems.dev}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-dev123!}
+      PGADMIN_CONFIG_SERVER_MODE: 'False'
+      PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: 'False'
+    volumes:
+      - ./docker/pgadmin/servers.json:/pgadmin4/servers.json:ro
+    ports:
+      - "${PGADMIN_PORT:-5050}:80"
+    networks:
+      - cems-dev-network
+    depends_on:
+      - postgres-dev
+
+  # ==================== REDIS COMMANDER FOR REDIS MANAGEMENT ====================
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    container_name: cems_redis_commander_dev
+    restart: unless-stopped
+    environment:
+      REDIS_HOSTS: local:redis-dev:6379
+      HTTP_USER: ${REDIS_COMMANDER_USER:-admin}
+      HTTP_PASSWORD: ${REDIS_COMMANDER_PASSWORD:-dev123!}
+    ports:
+      - "${REDIS_COMMANDER_PORT:-8081}:8081"
+    networks:
+      - cems-dev-network
+    depends_on:
+      - redis-dev
+
+  # ==================== MAILHOG FOR EMAIL TESTING ====================
+  mailhog:
+    image: mailhog/mailhog:latest
+    container_name: cems_mailhog_dev
+    restart: unless-stopped
+    ports:
+      - "${MAILHOG_WEB_PORT:-8025}:8025"  # Web interface
+      - "${MAILHOG_SMTP_PORT:-1025}:1025"  # SMTP server
+    networks:
+      - cems-dev-network
+
+  # ==================== DEVELOPMENT WORKER (Optional) ====================
+  worker-dev:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: development
+    container_name: cems_worker_dev
+    restart: unless-stopped
+    command: celery -A app.core.celery worker --loglevel=debug --reload
+    environment:
+      # Database Configuration
+      DATABASE_URL: postgresql://${POSTGRES_USER:-cems_user}:${POSTGRES_PASSWORD:-cems_password}@postgres-dev:5432/${POSTGRES_DB:-cems_db}
+      
+      # Redis Configuration (as broker)
+      CELERY_BROKER_URL: redis://redis-dev:6379/1
+      CELERY_RESULT_BACKEND: redis://redis-dev:6379/2
+      
+      # Application Configuration
+      ENVIRONMENT: development
+      LOG_LEVEL: DEBUG
+      PYTHONPATH: /app
+      PYTHONUNBUFFERED: 1
+      
+    volumes:
+      - .:/app
+      - ./logs:/app/logs
+    networks:
+      - cems-dev-network
+    depends_on:
+      postgres-dev:
+        condition: service_healthy
+      redis-dev:
+        condition: service_healthy
+    profiles:
+      - worker  # Only start when explicitly requested
+
+  # ==================== FLOWER FOR CELERY MONITORING ====================
+  flower:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: development
+    container_name: cems_flower_dev
+    restart: unless-stopped
+    command: celery -A app.core.celery flower --port=5555
+    environment:
+      CELERY_BROKER_URL: redis://redis-dev:6379/1
+      CELERY_RESULT_BACKEND: redis://redis-dev:6379/2
+    ports:
+      - "${FLOWER_PORT:-5555}:5555"
+    networks:
+      - cems-dev-network
+    depends_on:
+      - redis-dev
+    profiles:
+      - worker  # Only start when explicitly requested
+
+  # ==================== JUPYTER NOTEBOOK FOR DATA ANALYSIS ====================
+  jupyter:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: development
+    container_name: cems_jupyter_dev
+    restart: unless-stopped
+    command: >
+      sh -c "
+        pip install jupyter notebook ipython &&
+        jupyter notebook --ip=0.0.0.0 --port=8888 --no-browser --allow-root --NotebookApp.token='' --NotebookApp.password=''
+      "
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-cems_user}:${POSTGRES_PASSWORD:-cems_password}@postgres-dev:5432/${POSTGRES_DB:-cems_db}
+      PYTHONPATH: /app
+    volumes:
+      - .:/app
+      - ./notebooks:/app/notebooks
+    ports:
+      - "${JUPYTER_PORT:-8888}:8888"
+    networks:
+      - cems-dev-network
+    depends_on:
+      - postgres-dev
+    profiles:
+      - analysis  # Only start when explicitly requested
+
+# ==================== DEVELOPMENT PROFILES ====================
+# Use profiles to selectively start services:
+# docker-compose -f docker-compose.dev.yml up                    # Basic services only
+# docker-compose -f docker-compose.dev.yml --profile worker up   # Include worker services
+# docker-compose -f docker-compose.dev.yml --profile analysis up # Include analysis tools

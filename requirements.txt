@@ -1,147 +1,106 @@
+# ===============================================
+# CEMS - Currency Exchange Management System
+# Python Dependencies for Production & Development
+# ===============================================
+
 # ==================== CORE FRAMEWORK ====================
-fastapi==0.104.1
-uvicorn[standard]==0.24.0
-pydantic[email]==2.5.0
-pydantic-settings==2.1.0
+fastapi==0.104.1                    # Modern web framework for APIs
+uvicorn[standard]==0.24.0           # ASGI server with performance extras
+gunicorn==21.2.0                    # WSGI HTTP Server for production
+pydantic==2.5.0                     # Data validation using Python type hints
+pydantic[email]==2.5.0              # Email validation support
 
 # ==================== DATABASE ====================
-sqlalchemy==2.0.23
-asyncpg==0.29.0
-alembic==1.13.1
-psycopg2-binary==2.9.9
+sqlalchemy==2.0.23                  # SQL toolkit and ORM
+alembic==1.12.1                     # Database migration tool
+psycopg2-binary==2.9.9              # PostgreSQL adapter (binary dist)
+asyncpg==0.29.0                     # Async PostgreSQL driver
+greenlet==3.0.1                     # Async support for SQLAlchemy
 
 # ==================== AUTHENTICATION & SECURITY ====================
-python-jose[cryptography]==3.3.0
-passlib[bcrypt]==1.7.4
-python-multipart==0.0.6
-bcrypt==4.1.2
+python-jose[cryptography]==3.3.0    # JWT token handling
+passlib[bcrypt]==1.7.4              # Password hashing library
+bcrypt==4.1.2                       # Bcrypt hashing algorithm
+cryptography==41.0.8                # Cryptographic recipes and primitives
+python-multipart==0.0.6             # Form data parsing
 
-# ==================== CACHING & SESSION ====================
-redis==5.0.1
-aioredis==2.0.1
+# ==================== CACHING & PERFORMANCE ====================
+redis==5.0.1                        # Redis client for caching
+aioredis==2.0.1                     # Async Redis client
+celery==5.3.4                       # Distributed task queue
 
-# ==================== HTTP CLIENT ====================
-httpx==0.25.2
-aiohttp==3.9.1
-
-# ==================== VALIDATION & SERIALIZATION ====================
-email-validator==2.1.0
-phonenumbers==8.13.26
-
-# ==================== DATE & TIME ====================
-python-dateutil==2.8.2
-pytz==2023.3
-
-# ==================== FILE HANDLING ====================
-openpyxl==3.1.2
-pandas==2.1.4
-xlsxwriter==3.1.9
-python-docx==1.1.0
-PyPDF2==3.0.1
-pillow==10.1.0
-
-# ==================== ENVIRONMENT & CONFIG ====================
-python-dotenv==1.0.0
-
-# ==================== LOGGING & MONITORING ====================
-structlog==23.2.0
-colorlog==6.8.0
-
-# ==================== API DOCUMENTATION ====================
-# FastAPI includes Swagger/OpenAPI support automatically
-
-# ==================== TESTING ====================
-pytest==7.4.3
-pytest-asyncio==0.21.1
-pytest-cov==4.1.0
-pytest-mock==3.12.0
-httpx==0.25.2  # For testing FastAPI endpoints
-
-# ==================== CODE QUALITY ====================
-black==23.11.0
-isort==5.12.0
-flake8==6.1.0
-mypy==1.7.1
-
-# ==================== DEVELOPMENT TOOLS ====================
-pre-commit==3.6.0
-pytest-watch==4.2.0
-
-# ==================== BACKGROUND TASKS ====================
-celery[redis]==5.3.4
-kombu==5.3.4
-
-# ==================== EMAIL ====================
-fastapi-mail==1.4.1
-jinja2==3.1.2
-
-# ==================== WEBSOCKETS (for real-time features) ====================
-websockets==12.0
-
-# ==================== RATE LIMITING ====================
-slowapi==0.1.9
-
-# ==================== MIDDLEWARE ====================
-python-json-logger==2.0.7
-
-# ==================== CURRENCY & FINANCE ====================
-forex-python==1.8
-yfinance==0.2.28  # For exchange rates from financial APIs
+# ==================== HTTP & API ====================
+httpx==0.25.2                       # Modern HTTP client
+requests==2.31.0                    # HTTP library for external APIs
+aiofiles==23.2.1                    # Async file operations
+python-dateutil==2.8.2              # Date utilities
 
 # ==================== UTILITIES ====================
-python-slugify==8.0.1
-qrcode[pil]==7.4.2
-barcode==1.3.1
+python-dotenv==1.0.0                # Load environment variables from .env
+pytz==2023.3                        # Timezone definitions
+phonenumbers==8.13.25               # Phone number parsing and validation
+email-validator==2.1.0              # Email validation
+pycountry==23.12.11                 # Country and currency codes
 
-# ==================== DEPLOYMENT ====================
-gunicorn==21.2.0
+# ==================== LOGGING & MONITORING ====================
+structlog==23.2.0                   # Structured logging
+colorama==0.4.6                     # Cross-platform colored terminal text
+rich==13.7.0                        # Rich text and beautiful formatting
 
-# ==================== MONITORING (Optional) ====================
-prometheus-client==0.19.0
-psutil==5.9.6
+# ==================== DEVELOPMENT TOOLS ====================
+pytest==7.4.3                       # Testing framework
+pytest-asyncio==0.21.1              # Async testing support
+pytest-cov==4.1.0                   # Coverage plugin for pytest
+pytest-mock==3.12.0                 # Mock plugin for pytest
+factory-boy==3.3.0                  # Test fixtures replacement
+faker==20.1.0                       # Generate fake data for testing
 
-# ==================== AWS SDK (if using AWS services) ====================
-boto3==1.34.0
-botocore==1.34.0
+# ==================== CODE QUALITY ====================
+black==23.11.0                      # Code formatter
+isort==5.12.0                       # Import sorter
+flake8==6.1.0                       # Linting tool
+mypy==1.7.1                         # Static type checker
+pre-commit==3.6.0                   # Pre-commit hooks framework
 
-# ==================== ADDITIONAL SECURITY ====================
-cryptography==41.0.8
+# ==================== DOCUMENTATION ====================
+mkdocs==1.5.3                       # Documentation generator
+mkdocs-material==9.4.8              # Material theme for mkdocs
+mkdocs-swagger-ui-tag==0.6.8        # Swagger UI integration
 
-# ==================== JSON & API ====================
-orjson==3.9.10  # Faster JSON serialization
+# ==================== FINANCIAL & EXCHANGE RATES ====================
+forex-python==1.8                   # Foreign exchange rates
+yfinance==0.2.28                    # Yahoo Finance API
+alpha-vantage==2.3.1                # Alpha Vantage API client
 
-# ==================== INTERNATIONALIZATION ====================
-babel==2.13.1
+# ==================== DATA PROCESSING ====================
+pandas==2.1.4                       # Data analysis and manipulation
+numpy==1.26.2                       # Numerical computing
+openpyxl==3.1.2                     # Excel file handling
+xlsxwriter==3.1.9                   # Excel file writing
+reportlab==4.0.7                    # PDF generation
 
-# ==================== BACKUP & EXPORT ====================
-schedule==1.2.0
+# ==================== CONTAINER & DEPLOYMENT ====================
+docker-compose==1.29.2              # Docker compose Python library
 
-# ==================== DATABASE MIGRATIONS ====================
-# Alembic is already included above
+# ==================== SPECIFIC VERSIONS FOR STABILITY ====================
+# Pin critical dependencies to ensure reproducible builds
+click==8.1.7                        # Command line interface creation
+jinja2==3.1.2                       # Template engine
+markupsafe==2.1.3                   # HTML/XML safe string handling
+itsdangerous==2.1.2                 # Various helpers for trusted data
+starlette==0.27.0                   # ASGI framework (FastAPI dependency)
+anyio==4.1.0                        # Async concurrency library
 
-# ==================== TIMEZONE HANDLING ====================
-# python-dateutil and pytz already included above
+# ==================== OPTIONAL DEVELOPMENT EXTRAS ====================
+# Uncomment for additional development features:
+# jupyter==1.0.0                    # Jupyter notebook
+# ipython==8.17.2                   # Enhanced Python shell
+# notebook==7.0.6                   # Jupyter notebook server
+# matplotlib==3.8.2                 # Plotting library
+# seaborn==0.13.0                   # Statistical data visualization
 
-# ==================== DECIMAL PRECISION ====================
-decimal==1.70  # For precise financial calculations
-
-# ==================== UUID GENERATION ====================
-# Built-in uuid module is sufficient
-
-# ==================== HASHING & ENCODING ====================
-# passlib and bcrypt already included above
-
-# ==================== REGEX & STRING PROCESSING ====================
-# Built-in re module is sufficient
-
-# ==================== CONFIGURATION VALIDATION ====================
-# Pydantic already handles this
-
-# ==================== ASYNC UTILITIES ====================
-asyncio-throttle==1.0.2
-
-# ==================== FINANCIAL CALCULATIONS ====================
-quantlib==1.32  # Advanced financial calculations (optional)
-
-# ==================== DEVELOPMENT REQUIREMENTS ====================
-# Create requirements-dev.txt for development-only dependencies
+# ==================== PRODUCTION EXTRAS ====================
+# For production deployment with monitoring:
+# prometheus-client==0.19.0         # Prometheus metrics
+# sentry-sdk[fastapi]==1.38.0       # Error tracking
+# newrelic==9.2.0                   # Application monitoring

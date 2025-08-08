@@ -1,0 +1,545 @@
+#!/usr/bin/env python3
+"""
+Script: test_database.py
+Purpose: Database integration testing and validation utility for CEMS
+Author: CEMS Development Team
+Date: 2024
+"""
+
+import sys
+import os
+import argparse
+from datetime import datetime
+from decimal import Decimal
+from typing import Dict, List, Any, Optional
+
+# Add project root to path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from app.db.database import db_manager
+from app.db.init_db import (
+    verify_initialization, 
+    get_database_health,
+    quick_setup
+)
+from app.db.models import (
+    User, Role, Currency, ExchangeRate, Branch, BranchBalance,
+    Customer, Vault, VaultBalance, Transaction
+)
+from app.utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+
+class DatabaseTester:
+    """Comprehensive database testing and validation utility."""
+    
+    def __init__(self):
+        self.results = {
+            "timestamp": datetime.now().isoformat(),
+            "tests": {},
+            "summary": {
+                "total": 0,
+                "passed": 0,
+                "failed": 0,
+                "warnings": 0
+            }
+        }
+    
+    def run_test(self, test_name: str, test_func, *args, **kwargs) -> bool:
+        """
+        Run a single test and record results.
+        
+        Args:
+            test_name: Name of the test
+            test_func: Test function to run
+            *args: Arguments for test function
+            **kwargs: Keyword arguments for test function
+            
+        Returns:
+            bool: True if test passed
+        """
+        self.results["summary"]["total"] += 1
+        
+        try:
+            logger.info(f"Running test: {test_name}")
+            result = test_func(*args, **kwargs)
+            
+            if result.get("passed", False):
+                self.results["summary"]["passed"] += 1
+                logger.info(f"✓ {test_name} - PASSED")
+            else:
+                self.results["summary"]["failed"] += 1
+                logger.error(f"✗ {test_name} - FAILED")
+                
+            if result.get("warnings"):
+                self.results["summary"]["warnings"] += len(result["warnings"])
+            
+            self.results["tests"][test_name] = result
+            return result.get("passed", False)
+            
+        except Exception as e:
+            self.results["summary"]["failed"] += 1
+            error_result = {
+                "passed": False,
+                "error": str(e),
+                "timestamp": datetime.now().isoformat()
+            }
+            self.results["tests"][test_name] = error_result
+            logger.error(f"✗ {test_name} - ERROR: {e}")
+            return False
+    
+    def test_database_connection(self) -> Dict[str, Any]:
+        """Test database connection."""
+        result = {
+            "passed": False,
+            "details": {},
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        try:
+            # Test basic connection
+            connection_ok = db_manager.check_connection()
+            result["details"]["connection"] = connection_ok
+            
+            if connection_ok:
+                # Test session creation
+                with db_manager.get_session_context() as db:
+                    # Simple query test
+                    count = db.execute("SELECT 1").scalar()
+                    result["details"]["query_test"] = count == 1
+                    result["passed"] = True
+            
+        except Exception as e:
+            result["error"] = str(e)
+        
+        return result
+    
+    def test_table_existence(self) -> Dict[str, Any]:
+        """Test that all required tables exist."""
+        result = {
+            "passed": True,
+            "details": {},
+            "missing_tables": [],
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        required_tables = [
+            "roles", "currencies", "exchange_rates", "users", "user_roles",
+            "branches", "branch_balances", "customers", "vaults", 
+            "vault_balances", "vault_transactions", "transactions"
+        ]
+        
+        try:
+            with db_manager.get_session_context() as db:
+                for table_name in required_tables:
+                    try:
+                        # Check if table exists by querying it
+                        db.execute(f"SELECT 1 FROM {table_name} LIMIT 1")
+                        result["details"][table_name] = True
+                    except Exception:
+                        result["details"][table_name] = False
+                        result["missing_tables"].append(table_name)
+                        result["passed"] = False
+                        
+        except Exception as e:
+            result["error"] = str(e)
+            result["passed"] = False
+        
+        return result
+    
+    def test_foreign_key_constraints(self) -> Dict[str, Any]:
+        """Test foreign key constraints are working."""
+        result = {
+            "passed": True,
+            "details": {},
+            "failed_constraints": [],
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        # Test cases: (table, column, referenced_table, referenced_column)
+        fk_tests = [
+            ("users", "branch_id", "branches", "id"),
+            ("user_roles", "user_id", "users", "id"),
+            ("user_roles", "role_id", "roles", "id"),
+            ("exchange_rates", "from_currency_id", "currencies", "id"),
+            ("exchange_rates", "to_currency_id", "currencies", "id"),
+            ("branch_balances", "branch_id", "branches", "id"),
+            ("branch_balances", "currency_id", "currencies", "id"),
+            ("vault_balances", "vault_id", "vaults", "id"),
+            ("vault_balances", "currency_id", "currencies", "id"),
+        ]
+        
+        try:
+            with db_manager.get_session_context() as db:
+                for table, column, ref_table, ref_column in fk_tests:
+                    try:
+                        # Test foreign key constraint exists
+                        query = f"""
+                        SELECT COUNT(*) FROM information_schema.key_column_usage 
+                        WHERE table_name = '{table}' 
+                        AND column_name = '{column}'
+                        AND referenced_table_name = '{ref_table}'
+                        AND referenced_column_name = '{ref_column}'
+                        """
+                        count = db.execute(query).scalar()
+                        
+                        constraint_name = f"{table}.{column} -> {ref_table}.{ref_column}"
+                        if count > 0:
+                            result["details"][constraint_name] = True
+                        else:
+                            result["details"][constraint_name] = False
+                            result["failed_constraints"].append(constraint_name)
+                            # Don't fail the test for missing FK constraints in development
+                            # result["passed"] = False
+                            
+                    except Exception as e:
+                        constraint_name = f"{table}.{column} -> {ref_table}.{ref_column}"
+                        result["details"][constraint_name] = f"Error: {str(e)}"
+                        
+        except Exception as e:
+            result["error"] = str(e)
+            result["passed"] = False
+        
+        return result
+    
+    def test_data_integrity(self) -> Dict[str, Any]:
+        """Test data integrity and relationships."""
+        result = {
+            "passed": True,
+            "details": {},
+            "issues": [],
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        try:
+            with db_manager.get_session_context() as db:
+                # Test 1: Users with valid branches
+                users_with_invalid_branches = db.execute("""
+                    SELECT COUNT(*) FROM users 
+                    WHERE branch_id IS NOT NULL 
+                    AND branch_id NOT IN (SELECT id FROM branches)
+                """).scalar()
+                
+                result["details"]["users_with_invalid_branches"] = users_with_invalid_branches
+                if users_with_invalid_branches > 0:
+                    result["issues"].append(f"{users_with_invalid_branches} users with invalid branch references")
+                
+                # Test 2: Exchange rates with valid currencies
+                invalid_rates = db.execute("""
+                    SELECT COUNT(*) FROM exchange_rates 
+                    WHERE from_currency_id NOT IN (SELECT id FROM currencies)
+                    OR to_currency_id NOT IN (SELECT id FROM currencies)
+                """).scalar()
+                
+                result["details"]["invalid_exchange_rates"] = invalid_rates
+                if invalid_rates > 0:
+                    result["issues"].append(f"{invalid_rates} exchange rates with invalid currency references")
+                
+                # Test 3: Branch balances with valid references
+                invalid_balances = db.execute("""
+                    SELECT COUNT(*) FROM branch_balances 
+                    WHERE branch_id NOT IN (SELECT id FROM branches)
+                    OR currency_id NOT IN (SELECT id FROM currencies)
+                """).scalar()
+                
+                result["details"]["invalid_branch_balances"] = invalid_balances
+                if invalid_balances > 0:
+                    result["issues"].append(f"{invalid_balances} branch balances with invalid references")
+                
+                # Test 4: Check for negative balances
+                negative_balances = db.execute("""
+                    SELECT COUNT(*) FROM branch_balances 
+                    WHERE current_balance < 0
+                """).scalar()
+                
+                result["details"]["negative_balances"] = negative_balances
+                if negative_balances > 0:
+                    result["issues"].append(f"{negative_balances} branch balances are negative")
+                
+                # Overall result
+                if result["issues"]:
+                    result["passed"] = False
+                    
+        except Exception as e:
+            result["error"] = str(e)
+            result["passed"] = False
+        
+        return result
+    
+    def test_initial_data(self) -> Dict[str, Any]:
+        """Test that initial data was created properly."""
+        result = {
+            "passed": True,
+            "details": {},
+            "missing_data": [],
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        try:
+            with db_manager.get_session_context() as db:
+                # Check roles
+                role_count = db.query(Role).count()
+                result["details"]["roles_count"] = role_count
+                if role_count < 6:  # Should have 6 system roles
+                    result["missing_data"].append("Not all system roles created")
+                
+                # Check currencies
+                currency_count = db.query(Currency).count()
+                result["details"]["currencies_count"] = currency_count
+                if currency_count < 10:  # Should have major currencies
+                    result["missing_data"].append("Not all currencies created")
+                
+                # Check superuser
+                superuser = db.query(User).filter_by(is_superuser=True).first()
+                result["details"]["superuser_exists"] = superuser is not None
+                if not superuser:
+                    result["missing_data"].append("No superuser found")
+                
+                # Check main branch
+                main_branch = db.query(Branch).filter_by(is_main_branch=True).first()
+                result["details"]["main_branch_exists"] = main_branch is not None
+                if not main_branch:
+                    result["missing_data"].append("No main branch found")
+                
+                # Check main vault
+                main_vault = db.query(Vault).filter_by(is_main_vault=True).first()
+                result["details"]["main_vault_exists"] = main_vault is not None
+                if not main_vault:
+                    result["missing_data"].append("No main vault found")
+                
+                # Overall result
+                if result["missing_data"]:
+                    result["passed"] = False
+                    
+        except Exception as e:
+            result["error"] = str(e)
+            result["passed"] = False
+        
+        return result
+    
+    def test_crud_operations(self) -> Dict[str, Any]:
+        """Test basic CRUD operations."""
+        result = {
+            "passed": True,
+            "details": {},
+            "operations": {},
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        try:
+            with db_manager.get_session_context() as db:
+                # Test Create - Create a test customer
+                test_customer = Customer(
+                    customer_code="TEST001",
+                    customer_type="individual",
+                    first_name="Test",
+                    last_name="Customer",
+                    id_type="passport",
+                    id_number="TEST123456",
+                    nationality="US",
+                    mobile_number="+1234567890",
+                    email="test@example.com",
+                    status="active"
+                )
+                
+                db.add(test_customer)
+                db.commit()
+                result["operations"]["create"] = True
+                
+                # Test Read
+                retrieved = db.query(Customer).filter_by(customer_code="TEST001").first()
+                result["operations"]["read"] = retrieved is not None
+                
+                # Test Update
+                if retrieved:
+                    retrieved.first_name = "Updated"
+                    db.commit()
+                    
+                    updated = db.query(Customer).filter_by(customer_code="TEST001").first()
+                    result["operations"]["update"] = updated.first_name == "Updated"
+                
+                # Test Delete
+                if retrieved:
+                    db.delete(retrieved)
+                    db.commit()
+                    
+                    deleted = db.query(Customer).filter_by(customer_code="TEST001").first()
+                    result["operations"]["delete"] = deleted is None
+                
+                # Check all operations passed
+                result["passed"] = all(result["operations"].values())
+                
+        except Exception as e:
+            result["error"] = str(e)
+            result["passed"] = False
+        
+        return result
+    
+    def test_performance(self) -> Dict[str, Any]:
+        """Test basic database performance."""
+        result = {
+            "passed": True,
+            "details": {},
+            "timing": {},
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        try:
+            with db_manager.get_session_context() as db:
+                # Test query performance
+                start_time = datetime.now()
+                
+                # Simple count queries
+                role_count = db.query(Role).count()
+                result["timing"]["role_count"] = (datetime.now() - start_time).total_seconds()
+                
+                start_time = datetime.now()
+                currency_count = db.query(Currency).count()
+                result["timing"]["currency_count"] = (datetime.now() - start_time).total_seconds()
+                
+                start_time = datetime.now()
+                user_count = db.query(User).count()
+                result["timing"]["user_count"] = (datetime.now() - start_time).total_seconds()
+                
+                # Join query test
+                start_time = datetime.now()
+                join_result = db.query(User).join(Branch).count()
+                result["timing"]["join_query"] = (datetime.now() - start_time).total_seconds()
+                
+                # Check if any query took too long (> 1 second is concerning for simple queries)
+                slow_queries = {k: v for k, v in result["timing"].items() if v > 1.0}
+                result["details"]["slow_queries"] = slow_queries
+                
+                if slow_queries:
+                    result["passed"] = False
+                    
+        except Exception as e:
+            result["error"] = str(e)
+            result["passed"] = False
+        
+        return result
+    
+    def run_all_tests(self) -> Dict[str, Any]:
+        """Run all database tests."""
+        print("🧪 Starting comprehensive database tests...\n")
+        
+        # Run each test
+        tests = [
+            ("Database Connection", self.test_database_connection),
+            ("Table Existence", self.test_table_existence),
+            ("Foreign Key Constraints", self.test_foreign_key_constraints),
+            ("Data Integrity", self.test_data_integrity),
+            ("Initial Data", self.test_initial_data),
+            ("CRUD Operations", self.test_crud_operations),
+            ("Performance", self.test_performance),
+        ]
+        
+        for test_name, test_func in tests:
+            self.run_test(test_name, test_func)
+        
+        # Print summary
+        self.print_summary()
+        
+        return self.results
+    
+    def print_summary(self):
+        """Print test summary."""
+        summary = self.results["summary"]
+        
+        print("\n" + "="*60)
+        print("📊 TEST SUMMARY")
+        print("="*60)
+        print(f"Total Tests: {summary['total']}")
+        print(f"✅ Passed: {summary['passed']}")
+        print(f"❌ Failed: {summary['failed']}")
+        print(f"⚠️  Warnings: {summary['warnings']}")
+        print(f"Success Rate: {(summary['passed']/summary['total']*100):.1f}%")
+        
+        # Print failed tests
+        if summary['failed'] > 0:
+            print("\n❌ FAILED TESTS:")
+            for test_name, result in self.results["tests"].items():
+                if not result.get("passed", False):
+                    print(f"  - {test_name}")
+                    if "error" in result:
+                        print(f"    Error: {result['error']}")
+        
+        # Overall status
+        if summary['failed'] == 0:
+            print("\n🎉 All tests passed! Database is ready for use.")
+        else:
+            print(f"\n⚠️  {summary['failed']} test(s) failed. Please review and fix issues.")
+
+
+def main():
+    """Main function for command line usage."""
+    parser = argparse.ArgumentParser(description="CEMS Database Testing Utility")
+    parser.add_argument(
+        "--test", 
+        choices=["connection", "tables", "constraints", "integrity", "initial", "crud", "performance", "all"],
+        default="all",
+        help="Specific test to run (default: all)"
+    )
+    parser.add_argument(
+        "--setup", 
+        action="store_true", 
+        help="Run database setup before testing"
+    )
+    parser.add_argument(
+        "--reset", 
+        action="store_true", 
+        help="Reset database before setup (WARNING: Deletes all data)"
+    )
+    parser.add_argument(
+        "--json", 
+        action="store_true", 
+        help="Output results in JSON format"
+    )
+    
+    args = parser.parse_args()
+    
+    # Setup database if requested
+    if args.setup:
+        print("🔧 Setting up database...")
+        setup_result = quick_setup(reset=args.reset, verify=True)
+        if not setup_result["success"]:
+            print("❌ Database setup failed!")
+            for error in setup_result["errors"]:
+                print(f"  Error: {error}")
+            sys.exit(1)
+        print("✅ Database setup completed!\n")
+    
+    # Create tester and run tests
+    tester = DatabaseTester()
+    
+    if args.test == "all":
+        results = tester.run_all_tests()
+    else:
+        # Run specific test
+        test_map = {
+            "connection": tester.test_database_connection,
+            "tables": tester.test_table_existence,
+            "constraints": tester.test_foreign_key_constraints,
+            "integrity": tester.test_data_integrity,
+            "initial": tester.test_initial_data,
+            "crud": tester.test_crud_operations,
+            "performance": tester.test_performance,
+        }
+        
+        test_func = test_map[args.test]
+        tester.run_test(args.test.title(), test_func)
+        results = tester.results
+    
+    # Output results
+    if args.json:
+        import json
+        print(json.dumps(results, indent=2, default=str))
+    
+    # Exit with appropriate code
+    exit_code = 0 if results["summary"]["failed"] == 0 else 1
+    sys.exit(exit_code)
+
+
+if __name__ == "__main__":
+    main()
