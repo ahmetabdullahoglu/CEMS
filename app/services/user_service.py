@@ -1,6 +1,6 @@
 """
 Module: user_service
-Purpose: User management service providing comprehensive user operations for CEMS
+Purpose: Complete user management service providing comprehensive user operations for CEMS
 Author: CEMS Development Team
 Date: 2024
 """
@@ -15,16 +15,17 @@ from app.core.security import get_password_hash, security_manager
 from app.core.config import settings
 from app.core.constants import UserRole, UserStatus
 from app.core.exceptions import (
-    ValidationError, NotFoundError, DuplicateError, 
-    PermissionError, DatabaseError, BusinessLogicError
+    ValidationException, NotFoundError, DuplicateResourceException, 
+    InsufficientPermissionsException, DatabaseException, BusinessLogicException
 )
 from app.schemas.user import (
     UserCreateRequest, UserResponse, UserUpdateRequest, UserUpdateByAdminRequest,
     UserRoleAssignRequest, UserRoleRemoveRequest, UserSearchFilter, UserListRequest,
     UserListResponse, UserStatistics, PaginationInfo, UserUpdateResponse,
-    UserRoleResponse
+    UserRoleResponse, UserListItem
 )
 from app.schemas.auth import SecurityEvent
+from app.db.models.user import User, Role
 from app.utils.logger import get_logger
 from app.utils.validators import (
     validate_password_strength, validate_email_format, 
@@ -37,8 +38,8 @@ logger = get_logger(__name__)
 
 class UserService:
     """
-    User service providing comprehensive user management functionality.
-    Handles user creation, updates, role management, and business logic.
+    Complete user service providing comprehensive user management functionality.
+    Handles user creation, updates, role management, profile management, and analytics.
     """
     
     def __init__(self, db: Session):
@@ -56,6 +57,7 @@ class UserService:
         self.default_user_role = getattr(settings, 'DEFAULT_USER_ROLE', UserRole.CASHIER.value)
         self.require_email_verification = getattr(settings, 'REQUIRE_EMAIL_VERIFICATION', True)
         self.auto_generate_username = getattr(settings, 'AUTO_GENERATE_USERNAME', False)
+        self.default_password_length = getattr(settings, 'DEFAULT_PASSWORD_LENGTH', 12)
     
     # ==================== USER CREATION AND MANAGEMENT ====================
     
@@ -70,245 +72,264 @@ class UserService:
         
         Args:
             user_data: User creation data
-            created_by_user_id: ID of user creating this account
+            created_by_user_id: ID of user creating this user
             auto_assign_role: Whether to auto-assign default role
             
         Returns:
             UserResponse: Created user information
             
         Raises:
-            ValidationError: If validation fails
-            DuplicateError: If user already exists
-            PermissionError: If creator lacks permission
+            ValidationException: If validation fails
+            DuplicateResourceException: If user already exists
+            InsufficientPermissionsException: If creator lacks permissions
         """
         try:
-            # Validate creator permissions
-            if created_by_user_id:
-                self._validate_user_creation_permissions(created_by_user_id, user_data.roles)
-            
-            # Validate input data
+            # Validate user creation data
             self._validate_user_creation_data(user_data)
             
-            # Generate username if needed
+            # Check permissions if creator specified
+            if created_by_user_id:
+                self._validate_user_creation_permissions(
+                    created_by_user_id, 
+                    user_data.roles or []
+                )
+            
+            # Generate username if not provided and auto-generation enabled
             username = user_data.username
             if not username and self.auto_generate_username:
-                username = self._generate_username(user_data.first_name, user_data.last_name)
+                username = self._generate_unique_username(user_data.first_name, user_data.last_name)
             
             # Hash password
-            hashed_password = get_password_hash(user_data.password)
+            hashed_password = get_password_hash(user_data.password.get_secret_value())
             
-            # Prepare user data
-            user_create_data = {
-                "username": username,
-                "email": user_data.email.lower(),
-                "hashed_password": hashed_password,
-                "first_name": user_data.first_name.strip().title(),
-                "last_name": user_data.last_name.strip().title(),
-                "phone_number": user_data.phone_number,
-                "branch_id": user_data.branch_id,
-                "status": UserStatus.PENDING.value if self.require_email_verification else UserStatus.ACTIVE.value,
-                "is_verified": not self.require_email_verification,
-                "force_password_change": user_data.force_password_change,
-                "created_by": created_by_user_id
-            }
-            
-            # Add optional fields
-            if hasattr(user_data, 'language_preference') and user_data.language_preference:
-                user_create_data["language_preference"] = user_data.language_preference
-                
-            if hasattr(user_data, 'timezone') and user_data.timezone:
-                user_create_data["timezone"] = user_data.timezone
+            # Determine initial status
+            initial_status = UserStatus.PENDING if self.require_email_verification else UserStatus.ACTIVE
             
             # Create user
-            user = self.user_repo.create_user(**user_create_data)
+            user = self.user_repo.create_user(
+                username=username,
+                email=user_data.email,
+                hashed_password=hashed_password,
+                first_name=user_data.first_name,
+                last_name=user_data.last_name,
+                phone_number=user_data.phone_number,
+                status=initial_status,
+                is_active=True,
+                is_verified=not self.require_email_verification,
+                branch_id=user_data.branch_id
+            )
             
             # Assign roles
-            if auto_assign_role:
-                roles_to_assign = user_data.roles if user_data.roles else [self.default_user_role]
-                for role_name in roles_to_assign:
-                    try:
-                        self.user_repo.assign_role(user.id, role_name)
-                    except Exception as e:
-                        self.logger.warning(f"Failed to assign role {role_name} to user {user.id}: {str(e)}")
+            roles_to_assign = user_data.roles or []
+            if auto_assign_role and not roles_to_assign:
+                roles_to_assign = [UserRole(self.default_user_role)]
             
-            # Commit transaction
-            self.user_repo.commit()
+            for role in roles_to_assign:
+                try:
+                    self.user_repo.assign_role(user.id, role.value)
+                except Exception as e:
+                    self.logger.warning(f"Failed to assign role {role.value} to user {user.id}: {str(e)}")
             
-            # Send welcome email if verification not required
-            if not self.require_email_verification:
-                self._send_welcome_email(user)
-            else:
-                self._send_verification_email(user)
+            # Get user with roles for response
+            created_user = self.user_repo.get_by_id_with_roles(user.id)
+            user_roles = [role.name for role in self.user_repo.get_user_roles(user.id)]
             
             # Record activity
             self._record_user_activity(
                 user.id, created_by_user_id,
                 "user_created",
-                {"username": username, "email": user_data.email}
+                {
+                    "username": username,
+                    "email": user_data.email,
+                    "roles": user_roles,
+                    "auto_assign_role": auto_assign_role
+                }
             )
             
-            self.logger.info(f"Created user {user.id} ({username}) by user {created_by_user_id}")
+            self.logger.info(f"Created user: {username} (ID: {user.id})")
             
-            return UserResponse.from_orm(user)
+            # Convert to response
+            return self._user_to_response(created_user, include_sensitive=False)
             
-        except (ValidationError, DuplicateError, PermissionError):
-            self.user_repo.rollback()
+        except (ValidationException, DuplicateResourceException, InsufficientPermissionsException):
             raise
         except Exception as e:
-            self.user_repo.rollback()
             self.logger.error(f"Error creating user: {str(e)}")
-            raise BusinessLogicError(f"Failed to create user: {str(e)}")
+            raise BusinessLogicException(f"Failed to create user: {str(e)}")
+    
+    def get_user_by_id(
+        self,
+        user_id: int,
+        requesting_user_id: Optional[int] = None,
+        include_sensitive: bool = False
+    ) -> UserResponse:
+        """
+        Get user by ID with permission validation.
+        
+        Args:
+            user_id: User ID to retrieve
+            requesting_user_id: ID of user making request
+            include_sensitive: Whether to include sensitive information
+            
+        Returns:
+            UserResponse: User information
+            
+        Raises:
+            NotFoundError: If user not found
+            InsufficientPermissionsException: If insufficient permissions
+        """
+        try:
+            # Get user
+            user = self.user_repo.get_by_id_with_roles(user_id)
+            if not user:
+                raise NotFoundError(f"User with ID {user_id} not found")
+            
+            # Check permissions
+            if requesting_user_id:
+                self._validate_user_access_permissions(requesting_user_id, user_id, include_sensitive)
+            
+            return self._user_to_response(user, include_sensitive)
+            
+        except (NotFoundError, InsufficientPermissionsException):
+            raise
+        except Exception as e:
+            self.logger.error(f"Error getting user {user_id}: {str(e)}")
+            raise BusinessLogicException(f"Failed to get user: {str(e)}")
     
     def update_user(
         self,
         user_id: int,
         update_data: Union[UserUpdateRequest, UserUpdateByAdminRequest],
-        updated_by_user_id: Optional[int] = None,
-        is_admin_update: bool = False
+        updated_by_user_id: Optional[int] = None
     ) -> UserUpdateResponse:
         """
         Update user information with validation.
         
         Args:
             user_id: User ID to update
-            update_data: Update data
-            updated_by_user_id: ID of user performing update
-            is_admin_update: Whether this is an admin update
+            update_data: Update data (regular or admin)
+            updated_by_user_id: ID of user making update
             
         Returns:
             UserUpdateResponse: Update result
             
         Raises:
             NotFoundError: If user not found
-            PermissionError: If insufficient permissions
-            ValidationError: If validation fails
+            ValidationException: If validation fails
+            InsufficientPermissionsException: If insufficient permissions
         """
         try:
             # Get existing user
-            user = self.user_repo.get_by_id_or_raise(user_id)
+            existing_user = self.user_repo.get_by_id_with_roles(user_id)
+            if not existing_user:
+                raise NotFoundError(f"User with ID {user_id} not found")
             
-            # Validate permissions
+            # Check permissions
+            is_admin_update = isinstance(update_data, UserUpdateByAdminRequest)
             if updated_by_user_id:
                 self._validate_user_update_permissions(
                     updated_by_user_id, user_id, update_data, is_admin_update
                 )
             
             # Validate update data
-            self._validate_user_update_data(update_data, user)
+            self._validate_user_update_data(update_data, existing_user)
             
-            # Prepare update fields
-            update_fields = {}
-            updated_field_names = []
+            # Prepare update dictionary
+            update_dict = {}
+            updated_fields = []
             
-            # Handle basic fields
-            basic_fields = ['first_name', 'last_name', 'phone_number', 'language_preference', 'timezone']
-            for field in basic_fields:
-                if hasattr(update_data, field) and getattr(update_data, field) is not None:
-                    value = getattr(update_data, field)
-                    if field in ['first_name', 'last_name'] and value:
-                        value = value.strip().title()
-                    update_fields[field] = value
-                    updated_field_names.append(field)
+            # Process regular fields
+            for field, value in update_data.dict(exclude_unset=True).items():
+                if value is not None and hasattr(existing_user, field):
+                    if getattr(existing_user, field) != value:
+                        update_dict[field] = value
+                        updated_fields.append(field)
             
-            # Handle admin-only fields
-            if is_admin_update and isinstance(update_data, UserUpdateByAdminRequest):
-                admin_fields = [
-                    'username', 'email', 'status', 'is_active', 
-                    'is_superuser', 'is_verified', 'branch_id', 'force_password_change'
-                ]
+            # Handle password update if provided
+            if hasattr(update_data, 'password') and update_data.password:
+                # Validate password strength
+                password_validation = validate_password_strength(update_data.password.get_secret_value())
+                if not password_validation["is_strong"]:
+                    raise ValidationException("Password does not meet strength requirements")
                 
-                for field in admin_fields:
-                    if hasattr(update_data, field) and getattr(update_data, field) is not None:
-                        value = getattr(update_data, field)
-                        if field in ['username', 'email'] and value:
-                            value = value.lower()
-                        update_fields[field] = value
-                        updated_field_names.append(field)
+                update_dict['hashed_password'] = get_password_hash(update_data.password.get_secret_value())
+                update_dict['password_changed_at'] = datetime.utcnow()
+                updated_fields.append('password')
             
-            # Update user
-            updated_user = self.user_repo.update_user(user_id, update_fields)
-            if not updated_user:
-                raise NotFoundError("User not found")
-            
-            # Commit transaction
-            self.user_repo.commit()
+            # Perform update if there are changes
+            if update_dict:
+                updated_user = self.user_repo.update_user(user_id, update_dict)
+            else:
+                updated_user = existing_user
             
             # Record activity
             self._record_user_activity(
                 user_id, updated_by_user_id,
                 "user_updated",
                 {
-                    "updated_fields": updated_field_names,
+                    "updated_fields": updated_fields,
                     "is_admin_update": is_admin_update
                 }
             )
             
-            self.logger.info(f"Updated user {user_id} fields: {updated_field_names}")
+            self.logger.info(f"Updated user {user_id}: {updated_fields}")
             
             return UserUpdateResponse(
                 user_id=user_id,
-                updated_fields=updated_field_names,
+                updated_fields=updated_fields,
                 updated_at=datetime.utcnow()
             )
             
-        except (NotFoundError, PermissionError, ValidationError):
-            self.user_repo.rollback()
+        except (NotFoundError, ValidationException, InsufficientPermissionsException):
             raise
         except Exception as e:
-            self.user_repo.rollback()
             self.logger.error(f"Error updating user {user_id}: {str(e)}")
-            raise BusinessLogicError(f"Failed to update user: {str(e)}")
+            raise BusinessLogicException(f"Failed to update user: {str(e)}")
     
     def delete_user(
         self,
         user_id: int,
         deleted_by_user_id: Optional[int] = None,
-        soft_delete: bool = True
+        hard_delete: bool = False
     ) -> Dict[str, Any]:
         """
-        Delete user account.
+        Delete user (soft delete by default).
         
         Args:
             user_id: User ID to delete
             deleted_by_user_id: ID of user performing deletion
-            soft_delete: Whether to use soft delete
+            hard_delete: Whether to perform hard delete
             
         Returns:
-            Dict[str, Any]: Deletion result
+            Dictionary with deletion status
             
         Raises:
             NotFoundError: If user not found
-            PermissionError: If insufficient permissions
+            InsufficientPermissionsException: If insufficient permissions
         """
         try:
             # Get user
-            user = self.user_repo.get_by_id_or_raise(user_id)
+            user = self.user_repo.get_by_id_with_roles(user_id)
+            if not user:
+                raise NotFoundError(f"User with ID {user_id} not found")
             
-            # Validate permissions
+            # Check permissions
             if deleted_by_user_id:
                 self._validate_user_deletion_permissions(deleted_by_user_id, user_id)
             
-            # Cannot delete yourself
+            # Prevent self-deletion
             if deleted_by_user_id == user_id:
-                raise PermissionError("Cannot delete your own account")
+                raise ValidationException("Cannot delete your own account")
             
-            # Cannot delete superuser unless you're also a superuser
-            if user.is_superuser and deleted_by_user_id:
-                deleter = self.user_repo.get_by_id(deleted_by_user_id)
-                if not deleter or not deleter.is_superuser:
-                    raise PermissionError("Cannot delete superuser account")
-            
-            # Invalidate all user sessions
-            security_manager.session_manager.invalidate_user_sessions(user_id)
-            
-            # Delete user
-            success = self.user_repo.delete(user_id, soft_delete=soft_delete)
-            
-            if not success:
-                raise NotFoundError("User not found")
-            
-            # Commit transaction
-            self.user_repo.commit()
+            # Perform deletion
+            if hard_delete:
+                # Hard delete (actual database deletion)
+                self.user_repo.hard_delete(user_id)
+                deletion_type = "hard_delete"
+            else:
+                # Soft delete
+                self.user_repo.soft_delete(user_id)
+                deletion_type = "soft_delete"
             
             # Record activity
             self._record_user_activity(
@@ -316,82 +337,138 @@ class UserService:
                 "user_deleted",
                 {
                     "username": user.username,
-                    "soft_delete": soft_delete
+                    "deletion_type": deletion_type
                 }
             )
             
-            delete_type = "soft deleted" if soft_delete else "permanently deleted"
-            self.logger.warning(f"User {user_id} ({user.username}) {delete_type} by user {deleted_by_user_id}")
+            self.logger.warning(f"Deleted user {user_id} ({deletion_type})")
             
             return {
-                "message": f"User {delete_type} successfully",
+                "message": f"User {deletion_type.replace('_', ' ')} successfully",
                 "user_id": user_id,
-                "username": user.username,
-                "deleted_at": datetime.utcnow().isoformat(),
-                "soft_delete": soft_delete
+                "deletion_type": deletion_type
             }
             
-        except (NotFoundError, PermissionError):
-            self.user_repo.rollback()
+        except (NotFoundError, ValidationException, InsufficientPermissionsException):
             raise
         except Exception as e:
-            self.user_repo.rollback()
             self.logger.error(f"Error deleting user {user_id}: {str(e)}")
-            raise BusinessLogicError(f"Failed to delete user: {str(e)}")
+            raise BusinessLogicException(f"Failed to delete user: {str(e)}")
     
-    def restore_user(
+    # ==================== USER LISTING AND SEARCH ====================
+    
+    def list_users(
         self,
-        user_id: int,
-        restored_by_user_id: Optional[int] = None
-    ) -> Dict[str, Any]:
+        request: UserListRequest,
+        requesting_user_id: Optional[int] = None
+    ) -> UserListResponse:
         """
-        Restore soft-deleted user.
+        Get paginated list of users with filtering and sorting.
         
         Args:
-            user_id: User ID to restore
-            restored_by_user_id: ID of user performing restoration
+            request: List request with pagination and filters
+            requesting_user_id: ID of user making request
             
         Returns:
-            Dict[str, Any]: Restoration result
+            UserListResponse: Paginated user list
+            
+        Raises:
+            InsufficientPermissionsException: If insufficient permissions
         """
         try:
-            # Validate permissions
-            if restored_by_user_id:
-                self._validate_admin_permissions(restored_by_user_id)
+            # Check permissions
+            if requesting_user_id:
+                self._validate_user_list_permissions(requesting_user_id, request.filters)
             
-            # Restore user
-            success = self.user_repo.restore(user_id)
-            
-            if not success:
-                raise NotFoundError("User not found or not deleted")
-            
-            # Commit transaction
-            self.user_repo.commit()
-            
-            # Record activity
-            self._record_user_activity(
-                user_id, restored_by_user_id,
-                "user_restored",
-                {}
+            # Get paginated users
+            users, total_count = self.user_repo.get_users_paginated(
+                request, 
+                include_deleted=request.include_deleted
             )
             
-            self.logger.info(f"User {user_id} restored by user {restored_by_user_id}")
+            # Convert to list items
+            user_items = []
+            for user in users:
+                user_roles = [role.name for role in self.user_repo.get_user_roles(user.id)]
+                
+                user_item = UserListItem(
+                    id=user.id,
+                    username=user.username,
+                    email=user.email,
+                    full_name=f"{user.first_name} {user.last_name}",
+                    status=UserStatus(user.status),
+                    is_active=user.is_active,
+                    is_verified=user.is_verified,
+                    roles=user_roles,
+                    branch_id=user.branch_id,
+                    last_login_at=user.last_login_at,
+                    created_at=user.created_at
+                )
+                user_items.append(user_item)
             
-            return {
-                "message": "User restored successfully",
-                "user_id": user_id,
-                "restored_at": datetime.utcnow().isoformat()
-            }
+            # Calculate pagination info
+            total_pages = (total_count + request.page_size - 1) // request.page_size
+            pagination = PaginationInfo(
+                page=request.page,
+                page_size=request.page_size,
+                total_items=total_count,
+                total_pages=total_pages,
+                has_next=request.page < total_pages,
+                has_previous=request.page > 1
+            )
             
-        except (NotFoundError, PermissionError):
-            self.user_repo.rollback()
+            return UserListResponse(
+                users=user_items,
+                pagination=pagination,
+                filters_applied=request.filters is not None
+            )
+            
+        except InsufficientPermissionsException:
             raise
         except Exception as e:
-            self.user_repo.rollback()
-            self.logger.error(f"Error restoring user {user_id}: {str(e)}")
-            raise BusinessLogicError(f"Failed to restore user: {str(e)}")
+            self.logger.error(f"Error listing users: {str(e)}")
+            raise BusinessLogicException(f"Failed to list users: {str(e)}")
     
-    # ==================== USER ROLE MANAGEMENT ====================
+    def search_users(
+        self,
+        search_term: str,
+        filters: Optional[UserSearchFilter] = None,
+        requesting_user_id: Optional[int] = None
+    ) -> List[UserResponse]:
+        """
+        Search users by term with optional filters.
+        
+        Args:
+            search_term: Search term
+            filters: Optional search filters
+            requesting_user_id: ID of user making request
+            
+        Returns:
+            List[UserResponse]: Matching users
+        """
+        try:
+            # Check permissions
+            if requesting_user_id:
+                self._validate_user_list_permissions(requesting_user_id, filters)
+            
+            # Search users
+            users = self.user_repo.search_users(search_term, filters)
+            
+            # Convert to responses
+            user_responses = []
+            for user in users:
+                user_response = self._user_to_response(user, include_sensitive=False)
+                user_responses.append(user_response)
+            
+            return user_responses
+            
+        except InsufficientPermissionsException:
+            raise
+        except Exception as e:
+            self.logger.error(f"Error searching users: {str(e)}")
+            raise BusinessLogicException(f"Failed to search users: {str(e)}")
+    
+    # ==================== ROLE MANAGEMENT ====================
     
     def assign_roles(
         self,
@@ -416,31 +493,26 @@ class UserService:
                 self._validate_role_management_permissions(assigned_by_user_id, role_data.role_names)
             
             # Get user
-            user = self.user_repo.get_by_id_or_raise(user_id)
+            user = self.user_repo.get_by_id_with_roles(user_id)
+            if not user:
+                raise NotFoundError(f"User with ID {user_id} not found")
             
             # Get current roles
-            current_roles = self.user_repo.get_user_roles(user_id)
+            current_roles = [role.name for role in self.user_repo.get_user_roles(user_id)]
             
             # Assign new roles
             assigned_roles = []
             for role_name in role_data.role_names:
                 if role_name.value not in current_roles:
                     try:
-                        self.user_repo.assign_role(
-                            user_id, 
-                            role_name.value, 
-                            role_data.expires_at
-                        )
+                        self.user_repo.assign_role(user_id, role_name.value)
                         assigned_roles.append(role_name.value)
-                    except DuplicateError:
+                    except DuplicateResourceException:
                         # Role already assigned, skip
                         continue
             
             # Get updated roles
-            updated_roles = self.user_repo.get_user_roles(user_id)
-            
-            # Commit transaction
-            self.user_repo.commit()
+            updated_roles = [role.name for role in self.user_repo.get_user_roles(user_id)]
             
             # Record activity
             self._record_user_activity(
@@ -462,13 +534,11 @@ class UserService:
                 updated_at=datetime.utcnow()
             )
             
-        except (NotFoundError, PermissionError, DuplicateError):
-            self.user_repo.rollback()
+        except (NotFoundError, InsufficientPermissionsException, DuplicateResourceException):
             raise
         except Exception as e:
-            self.user_repo.rollback()
             self.logger.error(f"Error assigning roles to user {user_id}: {str(e)}")
-            raise BusinessLogicError(f"Failed to assign roles: {str(e)}")
+            raise BusinessLogicException(f"Failed to assign roles: {str(e)}")
     
     def remove_roles(
         self,
@@ -493,30 +563,22 @@ class UserService:
                 self._validate_role_management_permissions(removed_by_user_id, role_data.role_names)
             
             # Get user
-            user = self.user_repo.get_by_id_or_raise(user_id)
-            
-            # Get current roles
-            current_roles = self.user_repo.get_user_roles(user_id)
+            user = self.user_repo.get_by_id_with_roles(user_id)
+            if not user:
+                raise NotFoundError(f"User with ID {user_id} not found")
             
             # Remove roles
             removed_roles = []
             for role_name in role_data.role_names:
-                if role_name.value in current_roles:
-                    success = self.user_repo.remove_role(user_id, role_name.value)
-                    if success:
-                        removed_roles.append(role_name.value)
+                try:
+                    self.user_repo.remove_role(user_id, role_name.value)
+                    removed_roles.append(role_name.value)
+                except NotFoundError:
+                    # Role not assigned, skip
+                    continue
             
             # Get updated roles
-            updated_roles = self.user_repo.get_user_roles(user_id)
-            
-            # Ensure user always has at least one role
-            if not updated_roles:
-                self.user_repo.assign_role(user_id, self.default_user_role)
-                updated_roles = [self.default_user_role]
-                self.logger.info(f"Auto-assigned default role {self.default_user_role} to user {user_id}")
-            
-            # Commit transaction
-            self.user_repo.commit()
+            updated_roles = [role.name for role in self.user_repo.get_user_roles(user_id)]
             
             # Record activity
             self._record_user_activity(
@@ -535,243 +597,28 @@ class UserService:
                 updated_at=datetime.utcnow()
             )
             
-        except (NotFoundError, PermissionError):
-            self.user_repo.rollback()
+        except (NotFoundError, InsufficientPermissionsException):
             raise
         except Exception as e:
-            self.user_repo.rollback()
             self.logger.error(f"Error removing roles from user {user_id}: {str(e)}")
-            raise BusinessLogicError(f"Failed to remove roles: {str(e)}")
+            raise BusinessLogicException(f"Failed to remove roles: {str(e)}")
     
-    # ==================== USER SEARCH AND LISTING ====================
-    
-    def search_users(
-        self,
-        list_request: UserListRequest,
-        requesting_user_id: Optional[int] = None
-    ) -> UserListResponse:
+    def get_user_roles(self, user_id: int) -> List[str]:
         """
-        Search and list users with advanced filtering.
+        Get user roles.
         
         Args:
-            list_request: Search and pagination parameters
-            requesting_user_id: ID of user making request
+            user_id: User ID
             
         Returns:
-            UserListResponse: Search results with pagination
+            List[str]: User role names
         """
         try:
-            # Validate permissions
-            if requesting_user_id:
-                self._validate_user_list_permissions(requesting_user_id, list_request.filters)
-            
-            # Validate request parameters
-            self._validate_list_request(list_request)
-            
-            # Calculate pagination
-            skip = (list_request.page - 1) * list_request.page_size
-            
-            # Search users
-            users, total_count = self.user_repo.search_users(
-                filters=list_request.filters or UserSearchFilter(),
-                skip=skip,
-                limit=list_request.page_size,
-                sort_by=list_request.sort_by,
-                sort_desc=list_request.sort_order == "desc"
-            )
-            
-            # Convert to response objects
-            user_items = []
-            for user in users:
-                user_roles = self.user_repo.get_user_roles(user.id)
-                
-                # Create list item
-                user_item = {
-                    "id": user.id,
-                    "username": user.username,
-                    "email": user.email,
-                    "full_name": f"{user.first_name} {user.last_name}",
-                    "status": user.status,
-                    "roles": user_roles,
-                    "branch_id": user.branch_id,
-                    "is_active": user.is_active,
-                    "is_verified": user.is_verified,
-                    "is_superuser": user.is_superuser,
-                    "two_factor_enabled": user.two_factor_enabled,
-                    "created_at": user.created_at,
-                    "last_login_at": user.last_login_at,
-                    "is_locked": user.locked_until > datetime.utcnow() if user.locked_until else False
-                }
-                user_items.append(user_item)
-            
-            # Calculate pagination info
-            total_pages = (total_count + list_request.page_size - 1) // list_request.page_size
-            
-            pagination = PaginationInfo(
-                page=list_request.page,
-                page_size=list_request.page_size,
-                total_pages=total_pages,
-                has_next=list_request.page < total_pages,
-                has_previous=list_request.page > 1,
-                next_page=list_request.page + 1 if list_request.page < total_pages else None,
-                previous_page=list_request.page - 1 if list_request.page > 1 else None
-            )
-            
-            # Record search activity
-            if requesting_user_id:
-                self._record_user_activity(
-                    requesting_user_id, None,
-                    "users_searched",
-                    {
-                        "filters_applied": bool(list_request.filters),
-                        "results_count": len(user_items),
-                        "total_count": total_count
-                    }
-                )
-            
-            return UserListResponse(
-                users=user_items,
-                pagination=pagination,
-                total_count=total_count,
-                filters_applied=list_request.filters.dict() if list_request.filters else {}
-            )
-            
-        except (PermissionError, ValidationError):
-            raise
+            roles = self.user_repo.get_user_roles(user_id)
+            return [role.name for role in roles]
         except Exception as e:
-            self.logger.error(f"Error searching users: {str(e)}")
-            raise BusinessLogicError(f"Failed to search users: {str(e)}")
-    
-    def get_user_by_id(
-        self,
-        user_id: int,
-        requesting_user_id: Optional[int] = None,
-        include_roles: bool = True
-    ) -> UserResponse:
-        """
-        Get user by ID with role information.
-        
-        Args:
-            user_id: User ID to retrieve
-            requesting_user_id: ID of user making request
-            include_roles: Whether to include role information
-            
-        Returns:
-            UserResponse: User information
-        """
-        try:
-            # Validate permissions
-            if requesting_user_id:
-                self._validate_user_view_permissions(requesting_user_id, user_id)
-            
-            # Get user
-            if include_roles:
-                user = self.user_repo.get_user_with_roles(user_id)
-            else:
-                user = self.user_repo.get_by_id(user_id)
-            
-            if not user:
-                raise NotFoundError(f"User with ID {user_id} not found")
-            
-            # Convert to response
-            user_response = UserResponse.from_orm(user)
-            
-            # Add roles if requested
-            if include_roles:
-                user_response.roles = self.user_repo.get_user_roles(user_id)
-            
-            return user_response
-            
-        except (NotFoundError, PermissionError):
-            raise
-        except Exception as e:
-            self.logger.error(f"Error getting user {user_id}: {str(e)}")
-            raise BusinessLogicError(f"Failed to get user: {str(e)}")
-    
-    # ==================== USER STATISTICS AND ANALYTICS ====================
-    
-    def get_user_statistics(
-        self,
-        requesting_user_id: Optional[int] = None
-    ) -> UserStatistics:
-        """
-        Get comprehensive user statistics.
-        
-        Args:
-            requesting_user_id: ID of user requesting statistics
-            
-        Returns:
-            UserStatistics: User statistics
-        """
-        try:
-            # Validate permissions
-            if requesting_user_id:
-                self._validate_admin_permissions(requesting_user_id)
-            
-            # Get statistics from repository
-            stats = self.user_repo.get_user_statistics()
-            
-            # Convert to schema
-            user_stats = UserStatistics(
-                total_users=stats['total_users'],
-                active_users=stats['active_users'],
-                inactive_users=stats['inactive_users'],
-                verified_users=stats['verified_users'],
-                superusers=stats['superusers'],
-                locked_users=stats['locked_users'],
-                users_with_2fa=stats['users_with_2fa'],
-                recent_registrations=stats['recent_registrations'],
-                recent_logins=stats['recent_logins'],
-                **stats.get('status_breakdown', {})
-            )
-            
-            self.logger.info(f"User statistics retrieved by user {requesting_user_id}")
-            
-            return user_stats
-            
-        except PermissionError:
-            raise
-        except Exception as e:
-            self.logger.error(f"Error getting user statistics: {str(e)}")
-            raise BusinessLogicError(f"Failed to get user statistics: {str(e)}")
-    
-    def get_users_by_branch(
-        self,
-        branch_id: int,
-        requesting_user_id: Optional[int] = None
-    ) -> List[UserResponse]:
-        """
-        Get all users in a specific branch.
-        
-        Args:
-            branch_id: Branch ID
-            requesting_user_id: ID of user making request
-            
-        Returns:
-            List[UserResponse]: Users in the branch
-        """
-        try:
-            # Validate permissions
-            if requesting_user_id:
-                self._validate_branch_access_permissions(requesting_user_id, branch_id)
-            
-            # Get users
-            users = self.user_repo.get_users_by_branch(branch_id)
-            
-            # Convert to response objects
-            user_responses = []
-            for user in users:
-                user_response = UserResponse.from_orm(user)
-                user_response.roles = self.user_repo.get_user_roles(user.id)
-                user_responses.append(user_response)
-            
-            return user_responses
-            
-        except PermissionError:
-            raise
-        except Exception as e:
-            self.logger.error(f"Error getting users by branch {branch_id}: {str(e)}")
-            raise BusinessLogicError(f"Failed to get users by branch: {str(e)}")
+            self.logger.error(f"Error getting user roles for {user_id}: {str(e)}")
+            return []
     
     def get_users_by_role(
         self,
@@ -779,7 +626,7 @@ class UserService:
         requesting_user_id: Optional[int] = None
     ) -> List[UserResponse]:
         """
-        Get all users with a specific role.
+        Get all users with specific role.
         
         Args:
             role_name: Role name
@@ -799,17 +646,16 @@ class UserService:
             # Convert to response objects
             user_responses = []
             for user in users:
-                user_response = UserResponse.from_orm(user)
-                user_response.roles = self.user_repo.get_user_roles(user.id)
+                user_response = self._user_to_response(user, include_sensitive=False)
                 user_responses.append(user_response)
             
             return user_responses
             
-        except PermissionError:
+        except InsufficientPermissionsException:
             raise
         except Exception as e:
             self.logger.error(f"Error getting users by role {role_name}: {str(e)}")
-            raise BusinessLogicError(f"Failed to get users by role: {str(e)}")
+            raise BusinessLogicException(f"Failed to get users by role: {str(e)}")
     
     # ==================== ACCOUNT MANAGEMENT ====================
     
@@ -826,172 +672,442 @@ class UserService:
             activated_by_user_id: ID of user performing activation
             
         Returns:
-            Dict[str, Any]: Activation result
+            Dictionary with activation status
         """
         try:
-            # Validate permissions
+            # Get user
+            user = self.user_repo.get_by_id_with_roles(user_id)
+            if not user:
+                raise NotFoundError(f"User with ID {user_id} not found")
+            
+            # Check permissions
             if activated_by_user_id:
                 self._validate_admin_permissions(activated_by_user_id)
             
             # Update user status
-            updated_user = self.user_repo.update_user(user_id, {
-                "is_active": True,
+            self.user_repo.update_user(user_id, {
                 "status": UserStatus.ACTIVE.value,
-                "locked_until": None,
-                "lock_reason": None
+                "is_active": True,
+                "is_verified": True
             })
-            
-            if not updated_user:
-                raise NotFoundError("User not found")
-            
-            # Commit transaction
-            self.user_repo.commit()
             
             # Record activity
             self._record_user_activity(
                 user_id, activated_by_user_id,
                 "user_activated",
-                {}
+                {"previous_status": user.status}
             )
             
-            self.logger.info(f"User {user_id} activated by user {activated_by_user_id}")
+            self.logger.info(f"Activated user account {user_id}")
             
             return {
-                "message": "User activated successfully",
+                "message": "User account activated successfully",
                 "user_id": user_id,
-                "activated_at": datetime.utcnow().isoformat()
+                "status": UserStatus.ACTIVE.value
             }
             
-        except (NotFoundError, PermissionError):
-            self.user_repo.rollback()
+        except (NotFoundError, InsufficientPermissionsException):
             raise
         except Exception as e:
-            self.user_repo.rollback()
             self.logger.error(f"Error activating user {user_id}: {str(e)}")
-            raise BusinessLogicError(f"Failed to activate user: {str(e)}")
+            raise BusinessLogicException(f"Failed to activate user: {str(e)}")
     
     def deactivate_user(
         self,
         user_id: int,
-        deactivated_by_user_id: Optional[int] = None,
-        reason: str = None
+        reason: str,
+        deactivated_by_user_id: Optional[int] = None
     ) -> Dict[str, Any]:
         """
         Deactivate user account.
         
         Args:
             user_id: User ID to deactivate
-            deactivated_by_user_id: ID of user performing deactivation
             reason: Deactivation reason
+            deactivated_by_user_id: ID of user performing deactivation
             
         Returns:
-            Dict[str, Any]: Deactivation result
+            Dictionary with deactivation status
         """
         try:
-            # Validate permissions
+            # Get user
+            user = self.user_repo.get_by_id_with_roles(user_id)
+            if not user:
+                raise NotFoundError(f"User with ID {user_id} not found")
+            
+            # Check permissions
             if deactivated_by_user_id:
                 self._validate_admin_permissions(deactivated_by_user_id)
             
-            # Cannot deactivate yourself
+            # Prevent self-deactivation
             if deactivated_by_user_id == user_id:
-                raise PermissionError("Cannot deactivate your own account")
+                raise ValidationException("Cannot deactivate your own account")
             
             # Update user status
-            updated_user = self.user_repo.update_user(user_id, {
-                "is_active": False,
-                "status": UserStatus.SUSPENDED.value
+            self.user_repo.update_user(user_id, {
+                "status": UserStatus.SUSPENDED.value,
+                "is_active": False
             })
             
-            if not updated_user:
-                raise NotFoundError("User not found")
-            
-            # Invalidate all user sessions
-            security_manager.session_manager.invalidate_user_sessions(user_id)
-            
-            # Commit transaction
-            self.user_repo.commit()
+            # Invalidate user sessions
+            if hasattr(security_manager, 'session_manager'):
+                security_manager.session_manager.invalidate_user_sessions(user_id)
             
             # Record activity
             self._record_user_activity(
                 user_id, deactivated_by_user_id,
                 "user_deactivated",
-                {"reason": reason}
+                {
+                    "reason": reason,
+                    "previous_status": user.status
+                }
             )
             
-            self.logger.warning(f"User {user_id} deactivated by user {deactivated_by_user_id}. Reason: {reason}")
+            self.logger.warning(f"Deactivated user account {user_id}: {reason}")
             
             return {
-                "message": "User deactivated successfully",
+                "message": "User account deactivated successfully",
                 "user_id": user_id,
                 "reason": reason,
-                "deactivated_at": datetime.utcnow().isoformat()
+                "status": UserStatus.SUSPENDED.value
             }
             
-        except (NotFoundError, PermissionError):
-            self.user_repo.rollback()
+        except (NotFoundError, ValidationException, InsufficientPermissionsException):
             raise
         except Exception as e:
-            self.user_repo.rollback()
             self.logger.error(f"Error deactivating user {user_id}: {str(e)}")
-            raise BusinessLogicError(f"Failed to deactivate user: {str(e)}")
+            raise BusinessLogicException(f"Failed to deactivate user: {str(e)}")
+    
+    def lock_user_account(
+        self,
+        user_id: int,
+        reason: str,
+        locked_until: Optional[datetime] = None,
+        locked_by_user_id: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """
+        Lock user account.
+        
+        Args:
+            user_id: User ID to lock
+            reason: Lock reason
+            locked_until: Optional unlock time
+            locked_by_user_id: ID of user performing lock
+            
+        Returns:
+            Dictionary with lock status
+        """
+        try:
+            # Check permissions
+            if locked_by_user_id:
+                self._validate_admin_permissions(locked_by_user_id)
+            
+            # Lock account using repository
+            success = self.user_repo.lock_user_account(user_id, reason, locked_until)
+            
+            if success:
+                # Invalidate user sessions
+                if hasattr(security_manager, 'session_manager'):
+                    security_manager.session_manager.invalidate_user_sessions(user_id)
+                
+                # Record activity
+                self._record_user_activity(
+                    user_id, locked_by_user_id,
+                    "user_locked",
+                    {
+                        "reason": reason,
+                        "locked_until": locked_until.isoformat() if locked_until else None
+                    }
+                )
+                
+                return {
+                    "message": "User account locked successfully",
+                    "user_id": user_id,
+                    "reason": reason,
+                    "locked_until": locked_until
+                }
+            else:
+                raise BusinessLogicException("Failed to lock user account")
+                
+        except InsufficientPermissionsException:
+            raise
+        except Exception as e:
+            self.logger.error(f"Error locking user {user_id}: {str(e)}")
+            raise BusinessLogicException(f"Failed to lock user: {str(e)}")
+    
+    def unlock_user_account(
+        self,
+        user_id: int,
+        unlocked_by_user_id: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """
+        Unlock user account.
+        
+        Args:
+            user_id: User ID to unlock
+            unlocked_by_user_id: ID of user performing unlock
+            
+        Returns:
+            Dictionary with unlock status
+        """
+        try:
+            # Check permissions
+            if unlocked_by_user_id:
+                self._validate_admin_permissions(unlocked_by_user_id)
+            
+            # Unlock account using repository
+            success = self.user_repo.unlock_user_account(user_id)
+            
+            if success:
+                # Record activity
+                self._record_user_activity(
+                    user_id, unlocked_by_user_id,
+                    "user_unlocked",
+                    {}
+                )
+                
+                return {
+                    "message": "User account unlocked successfully",
+                    "user_id": user_id,
+                    "status": UserStatus.ACTIVE.value
+                }
+            else:
+                raise BusinessLogicException("Failed to unlock user account")
+                
+        except InsufficientPermissionsException:
+            raise
+        except Exception as e:
+            self.logger.error(f"Error unlocking user {user_id}: {str(e)}")
+            raise BusinessLogicException(f"Failed to unlock user: {str(e)}")
+    
+    # ==================== USER ANALYTICS ====================
+    
+    def get_user_statistics(
+        self,
+        requesting_user_id: Optional[int] = None
+    ) -> UserStatistics:
+        """
+        Get user statistics for analytics.
+        
+        Args:
+            requesting_user_id: ID of user requesting statistics
+            
+        Returns:
+            UserStatistics: User statistics
+        """
+        try:
+            # Check permissions
+            if requesting_user_id:
+                self._validate_admin_permissions(requesting_user_id)
+            
+            # Get statistics
+            total_users = self.user_repo.get_total_count()
+            active_users = self.user_repo.get_active_users_count()
+            
+            # Get users by status
+            pending_users = len(self.user_repo.get_users_by_status(UserStatus.PENDING))
+            suspended_users = len(self.user_repo.get_users_by_status(UserStatus.SUSPENDED))
+            locked_users = len(self.user_repo.get_users_by_status(UserStatus.LOCKED))
+            
+            # Get users by role
+            admin_users = len(self.user_repo.get_users_by_role(UserRole.ADMIN.value))
+            manager_users = len(self.user_repo.get_users_by_role(UserRole.BRANCH_MANAGER.value))
+            cashier_users = len(self.user_repo.get_users_by_role(UserRole.CASHIER.value))
+            
+            return UserStatistics(
+                total_users=total_users,
+                active_users=active_users,
+                inactive_users=total_users - active_users,
+                pending_users=pending_users,
+                suspended_users=suspended_users,
+                locked_users=locked_users,
+                admin_users=admin_users,
+                manager_users=manager_users,
+                cashier_users=cashier_users,
+                verified_users=total_users - pending_users,  # Approximation
+                unverified_users=pending_users
+            )
+            
+        except InsufficientPermissionsException:
+            raise
+        except Exception as e:
+            self.logger.error(f"Error getting user statistics: {str(e)}")
+            raise BusinessLogicException(f"Failed to get user statistics: {str(e)}")
+    
+    # ==================== UTILITY AND HELPER METHODS ====================
+    
+    def _user_to_response(self, user: User, include_sensitive: bool = False) -> UserResponse:
+        """
+        Convert User model to UserResponse.
+        
+        Args:
+            user: User model instance
+            include_sensitive: Whether to include sensitive information
+            
+        Returns:
+            UserResponse: User response object
+        """
+        user_roles = [role.name for role in self.user_repo.get_user_roles(user.id)]
+        user_permissions = self.user_repo.get_user_permissions(user.id) if include_sensitive else []
+        
+        return UserResponse(
+            id=user.id,
+            username=user.username,
+            email=user.email,
+            first_name=user.first_name,
+            last_name=user.last_name,
+            full_name=f"{user.first_name} {user.last_name}",
+            phone_number=user.phone_number,
+            status=UserStatus(user.status),
+            is_active=user.is_active,
+            is_superuser=user.is_superuser,
+            is_verified=user.is_verified,
+            roles=user_roles,
+            permissions=user_permissions,
+            branch_id=user.branch_id,
+            last_login_at=user.last_login_at,
+            last_login_ip=user.last_login_ip if include_sensitive else None,
+            created_at=user.created_at,
+            updated_at=user.updated_at
+        )
+    
+    def _generate_unique_username(self, first_name: str, last_name: str) -> str:
+        """
+        Generate unique username from names.
+        
+        Args:
+            first_name: User's first name
+            last_name: User's last name
+            
+        Returns:
+            str: Unique username
+        """
+        base_username = f"{first_name.lower()}.{last_name.lower()}"
+        username = base_username
+        counter = 1
+        
+        while self.user_repo.check_username_exists(username):
+            username = f"{base_username}{counter}"
+            counter += 1
+        
+        return username
+    
+    def _record_user_activity(
+        self,
+        user_id: int,
+        performed_by_user_id: Optional[int],
+        activity_type: str,
+        details: Dict[str, Any]
+    ) -> None:
+        """
+        Record user activity for audit trail.
+        
+        Args:
+            user_id: User ID the activity relates to
+            performed_by_user_id: ID of user who performed the activity
+            activity_type: Type of activity
+            details: Activity details
+        """
+        try:
+            activity_data = {
+                "user_id": user_id,
+                "performed_by_user_id": performed_by_user_id,
+                "activity_type": activity_type,
+                "timestamp": datetime.utcnow().isoformat(),
+                "details": details
+            }
+            
+            # Log activity
+            self.logger.info(f"User activity: {activity_type}", extra=activity_data)
+            
+            # TODO: Store in activity audit table
+            # activity_audit_repo.create_activity(activity_data)
+            
+        except Exception as e:
+            self.logger.error(f"Failed to record user activity: {str(e)}")
     
     # ==================== VALIDATION METHODS ====================
     
     def _validate_user_creation_data(self, user_data: UserCreateRequest) -> None:
-        """Validate user creation data."""
+        """
+        Validate user creation data.
+        
+        Args:
+            user_data: User creation data
+            
+        Raises:
+            ValidationException: If validation fails
+        """
         # Validate email format
         if not validate_email_format(user_data.email):
-            raise ValidationError("Invalid email format")
+            raise ValidationException("Invalid email format")
         
-        # Validate username format
+        # Validate username format if provided
         if user_data.username and not validate_username_format(user_data.username):
-            raise ValidationError("Invalid username format")
+            raise ValidationException("Invalid username format")
         
         # Validate password strength
-        password_validation = validate_password_strength(user_data.password)
-        if not password_validation["is_valid"]:
-            raise ValidationError(f"Password requirements not met: {password_validation['message']}")
+        password_validation = validate_password_strength(user_data.password.get_secret_value())
+        if not password_validation["is_strong"]:
+            raise ValidationException(f"Password requirements not met: {password_validation['feedback']}")
         
-        # Validate phone number
+        # Validate phone number if provided
         if user_data.phone_number and not validate_phone_number(user_data.phone_number):
-            raise ValidationError("Invalid phone number format")
+            raise ValidationException("Invalid phone number format")
         
-        # Validate roles
+        # Validate roles if provided
         if user_data.roles:
             for role in user_data.roles:
-                if role not in [r.value for r in UserRole]:
-                    raise ValidationError(f"Invalid role: {role}")
+                if role not in [r for r in UserRole]:
+                    raise ValidationException(f"Invalid role: {role}")
     
     def _validate_user_update_data(self, update_data, existing_user) -> None:
-        """Validate user update data."""
+        """
+        Validate user update data.
+        
+        Args:
+            update_data: Update data
+            existing_user: Existing user model
+            
+        Raises:
+            ValidationException: If validation fails
+        """
         # Validate email format if provided
         if hasattr(update_data, 'email') and update_data.email:
             if not validate_email_format(update_data.email):
-                raise ValidationError("Invalid email format")
+                raise ValidationException("Invalid email format")
         
         # Validate username format if provided
         if hasattr(update_data, 'username') and update_data.username:
             if not validate_username_format(update_data.username):
-                raise ValidationError("Invalid username format")
+                raise ValidationException("Invalid username format")
         
         # Validate phone number if provided
         if hasattr(update_data, 'phone_number') and update_data.phone_number:
             if not validate_phone_number(update_data.phone_number):
-                raise ValidationError("Invalid phone number format")
+                raise ValidationException("Invalid phone number format")
     
-    def _validate_user_creation_permissions(self, creator_id: int, roles: List[str]) -> None:
-        """Validate user creation permissions."""
-        creator = self.user_repo.get_by_id_or_raise(creator_id)
-        creator_roles = self.user_repo.get_user_roles(creator_id)
+    def _validate_user_creation_permissions(self, creator_id: int, roles: List[UserRole]) -> None:
+        """
+        Validate user creation permissions.
+        
+        Args:
+            creator_id: ID of user creating the user
+            roles: Roles to assign to new user
+            
+        Raises:
+            InsufficientPermissionsException: If insufficient permissions
+        """
+        creator_roles = [role.name for role in self.user_repo.get_user_roles(creator_id)]
         
         # Only admins can create users
         if not any(role in [UserRole.SUPER_ADMIN.value, UserRole.ADMIN.value] for role in creator_roles):
-            raise PermissionError("Insufficient permissions to create users")
+            raise InsufficientPermissionsException("Insufficient permissions to create users")
         
         # Only super admins can create admin users
-        if roles and UserRole.ADMIN.value in roles:
+        if roles and any(role in [UserRole.ADMIN, UserRole.SUPER_ADMIN] for role in roles):
             if UserRole.SUPER_ADMIN.value not in creator_roles:
-                raise PermissionError("Only super admins can create admin users")
+                raise InsufficientPermissionsException("Only super admins can create admin users")
     
     def _validate_user_update_permissions(
         self, 
@@ -1000,9 +1116,19 @@ class UserService:
         update_data, 
         is_admin_update: bool
     ) -> None:
-        """Validate user update permissions."""
-        updater = self.user_repo.get_by_id_or_raise(updater_id)
-        updater_roles = self.user_repo.get_user_roles(updater_id)
+        """
+        Validate user update permissions.
+        
+        Args:
+            updater_id: ID of user performing update
+            user_id: ID of user being updated
+            update_data: Update data
+            is_admin_update: Whether this is an admin update
+            
+        Raises:
+            InsufficientPermissionsException: If insufficient permissions
+        """
+        updater_roles = [role.name for role in self.user_repo.get_user_roles(updater_id)]
         
         # Users can update their own basic profile
         if updater_id == user_id and not is_admin_update:
@@ -1011,144 +1137,107 @@ class UserService:
         # Admin updates require admin permissions
         if is_admin_update:
             if not any(role in [UserRole.SUPER_ADMIN.value, UserRole.ADMIN.value] for role in updater_roles):
-                raise PermissionError("Insufficient permissions for admin updates")
+                raise InsufficientPermissionsException("Insufficient permissions for admin updates")
     
     def _validate_user_deletion_permissions(self, deleter_id: int, user_id: int) -> None:
-        """Validate user deletion permissions."""
-        deleter_roles = self.user_repo.get_user_roles(deleter_id)
+        """
+        Validate user deletion permissions.
+        
+        Args:
+            deleter_id: ID of user performing deletion
+            user_id: ID of user being deleted
+            
+        Raises:
+            InsufficientPermissionsException: If insufficient permissions
+        """
+        deleter_roles = [role.name for role in self.user_repo.get_user_roles(deleter_id)]
         
         if not any(role in [UserRole.SUPER_ADMIN.value, UserRole.ADMIN.value] for role in deleter_roles):
-            raise PermissionError("Insufficient permissions to delete users")
+            raise InsufficientPermissionsException("Insufficient permissions to delete users")
     
     def _validate_admin_permissions(self, user_id: int) -> None:
-        """Validate admin permissions."""
-        user_roles = self.user_repo.get_user_roles(user_id)
+        """
+        Validate admin permissions.
+        
+        Args:
+            user_id: User ID to check
+            
+        Raises:
+            InsufficientPermissionsException: If insufficient permissions
+        """
+        user_roles = [role.name for role in self.user_repo.get_user_roles(user_id)]
         
         if not any(role in [UserRole.SUPER_ADMIN.value, UserRole.ADMIN.value] for role in user_roles):
-            raise PermissionError("Admin permissions required")
+            raise InsufficientPermissionsException("Admin permissions required")
     
     def _validate_role_management_permissions(self, manager_id: int, roles: List[UserRole]) -> None:
-        """Validate role management permissions."""
-        manager_roles = self.user_repo.get_user_roles(manager_id)
+        """
+        Validate role management permissions.
+        
+        Args:
+            manager_id: ID of user managing roles
+            roles: Roles being managed
+            
+        Raises:
+            InsufficientPermissionsException: If insufficient permissions
+        """
+        manager_roles = [role.name for role in self.user_repo.get_user_roles(manager_id)]
         
         # Only admins can manage roles
         if not any(role in [UserRole.SUPER_ADMIN.value, UserRole.ADMIN.value] for role in manager_roles):
-            raise PermissionError("Insufficient permissions to manage roles")
+            raise InsufficientPermissionsException("Insufficient permissions to manage roles")
         
         # Only super admins can assign admin roles
-        admin_roles = [UserRole.SUPER_ADMIN.value, UserRole.ADMIN.value]
-        if any(role.value in admin_roles for role in roles):
+        admin_roles = [UserRole.SUPER_ADMIN, UserRole.ADMIN]
+        if any(role in admin_roles for role in roles):
             if UserRole.SUPER_ADMIN.value not in manager_roles:
-                raise PermissionError("Only super admins can manage admin roles")
+                raise InsufficientPermissionsException("Only super admins can manage admin roles")
+    
+    def _validate_user_access_permissions(
+        self, 
+        requesting_user_id: int, 
+        target_user_id: int, 
+        include_sensitive: bool
+    ) -> None:
+        """
+        Validate user access permissions.
+        
+        Args:
+            requesting_user_id: ID of user making request
+            target_user_id: ID of user being accessed
+            include_sensitive: Whether sensitive info is requested
+            
+        Raises:
+            InsufficientPermissionsException: If insufficient permissions
+        """
+        # Users can access their own information
+        if requesting_user_id == target_user_id:
+            return
+        
+        # Admin access for other users
+        requesting_user_roles = [role.name for role in self.user_repo.get_user_roles(requesting_user_id)]
+        
+        if not any(role in [UserRole.SUPER_ADMIN.value, UserRole.ADMIN.value] for role in requesting_user_roles):
+            raise InsufficientPermissionsException("Insufficient permissions to access user information")
+        
+        # Sensitive information requires higher permissions
+        if include_sensitive:
+            if UserRole.SUPER_ADMIN.value not in requesting_user_roles:
+                raise InsufficientPermissionsException("Insufficient permissions for sensitive information")
     
     def _validate_user_list_permissions(self, user_id: int, filters: Optional[UserSearchFilter]) -> None:
-        """Validate user listing permissions."""
-        user_roles = self.user_repo.get_user_roles(user_id)
+        """
+        Validate user listing permissions.
         
-        # Branch managers can view users in their branch
-        if UserRole.BRANCH_MANAGER.value in user_roles:
-            user = self.user_repo.get_by_id(user_id)
-            if user and filters and filters.branch_id and filters.branch_id != user.branch_id:
-                raise PermissionError("Can only view users in your branch")
-        
-        # Non-admin users have limited access
-        elif not any(role in [UserRole.SUPER_ADMIN.value, UserRole.ADMIN.value] for role in user_roles):
-            raise PermissionError("Insufficient permissions to list users")
-    
-    def _validate_user_view_permissions(self, viewer_id: int, user_id: int) -> None:
-        """Validate user view permissions."""
-        # Users can view their own profile
-        if viewer_id == user_id:
-            return
-        
-        viewer_roles = self.user_repo.get_user_roles(viewer_id)
-        
-        # Admins can view all users
-        if any(role in [UserRole.SUPER_ADMIN.value, UserRole.ADMIN.value] for role in viewer_roles):
-            return
-        
-        # Branch managers can view users in their branch
-        if UserRole.BRANCH_MANAGER.value in viewer_roles:
-            viewer = self.user_repo.get_by_id(viewer_id)
-            target_user = self.user_repo.get_by_id(user_id)
-            if viewer and target_user and viewer.branch_id == target_user.branch_id:
-                return
-        
-        raise PermissionError("Insufficient permissions to view user")
-    
-    def _validate_branch_access_permissions(self, user_id: int, branch_id: int) -> None:
-        """Validate branch access permissions."""
-        user_roles = self.user_repo.get_user_roles(user_id)
-        
-        # Admins can access all branches
-        if any(role in [UserRole.SUPER_ADMIN.value, UserRole.ADMIN.value] for role in user_roles):
-            return
-        
-        # Users can only access their own branch
-        user = self.user_repo.get_by_id(user_id)
-        if user and user.branch_id == branch_id:
-            return
-        
-        raise PermissionError("Insufficient permissions to access branch")
-    
-    def _validate_list_request(self, list_request: UserListRequest) -> None:
-        """Validate list request parameters."""
-        if list_request.page < 1:
-            raise ValidationError("Page number must be at least 1")
-        
-        if list_request.page_size < 1 or list_request.page_size > 100:
-            raise ValidationError("Page size must be between 1 and 100")
-        
-        valid_sort_fields = ['id', 'username', 'email', 'first_name', 'last_name', 'created_at', 'last_login_at', 'status']
-        if list_request.sort_by not in valid_sort_fields:
-            raise ValidationError(f"Invalid sort field: {list_request.sort_by}")
-    
-    # ==================== UTILITY METHODS ====================
-    
-    def _generate_username(self, first_name: str, last_name: str) -> str:
-        """Generate unique username from name."""
-        base_username = f"{first_name.lower()}.{last_name.lower()}"
-        base_username = ''.join(c for c in base_username if c.isalnum() or c == '.')
-        
-        # Ensure uniqueness
-        username = base_username
-        counter = 1
-        while self.user_repo.get_by_username(username):
-            username = f"{base_username}{counter}"
-            counter += 1
-        
-        return username
-    
-    def _send_welcome_email(self, user) -> None:
-        """Send welcome email to user."""
-        # TODO: Implement email sending
-        self.logger.info(f"Welcome email would be sent to {user.email}")
-    
-    def _send_verification_email(self, user) -> None:
-        """Send email verification to user."""
-        # TODO: Implement email verification
-        self.logger.info(f"Verification email would be sent to {user.email}")
-    
-    def _record_user_activity(
-        self,
-        user_id: int,
-        actor_id: Optional[int],
-        activity_type: str,
-        details: Dict[str, Any]
-    ) -> None:
-        """Record user activity for auditing."""
-        try:
-            # In production, store in audit log table
-            activity_data = {
-                "user_id": user_id,
-                "actor_id": actor_id,
-                "activity_type": activity_type,
-                "details": details,
-                "timestamp": datetime.utcnow(),
-                "ip_address": getattr(details, 'ip_address', None)
-            }
+        Args:
+            user_id: ID of user requesting list
+            filters: Optional filters being applied
             
-            self.logger.info(f"User activity: {activity_type} for user {user_id} by {actor_id}")
-            
-        except Exception as e:
-            self.logger.error(f"Failed to record user activity: {str(e)}")
+        Raises:
+            InsufficientPermissionsException: If insufficient permissions
+        """
+        user_roles = [role.name for role in self.user_repo.get_user_roles(user_id)]
+        
+        # Only admins can list users
+        if not any(role in [UserRole.SUPER_ADMIN.value, UserRole.ADMIN.value] for role in user_roles):
+            raise InsufficientPermissionsException("Insufficient permissions to list users")

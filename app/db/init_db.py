@@ -5,32 +5,32 @@ Author: CEMS Development Team
 Date: 2024
 """
 
-import logging
+import json
 from decimal import Decimal
-from datetime import date, datetime, time, timedelta
+from datetime import datetime, timedelta
 from typing import Optional, Dict, List, Any
 from sqlalchemy.orm import Session
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 
 from app.core.config import settings
 from app.core.constants import UserRole, UserStatus, CurrencyCode, CURRENCY_NAMES, CURRENCY_SYMBOLS
 from app.core.security import get_password_hash
-from app.db.database import db_manager
-from app.db.models import (
-    User, Role, UserRole as UserRoleAssoc, Currency, ExchangeRate, 
-    Branch, BranchBalance, Customer, Vault, VaultBalance, VaultTransaction
-)
-from app.utils.logger import get_logger
-
-
+from app.db.database import SessionLocal
+from app.db.models.user import User, Role, UserRole as UserRoleAssoc
+from app.db.models.currency import Currency, ExchangeRate
+from app.db.models.branch import Branch, BranchBalance
+from app.db.models.customer import Customer
+from app.db.models.vault import Vault, VaultBalance, VaultTransaction
 from app.repositories.user_repository import UserRepository
 from app.services.user_service import UserService
 from app.services.auth_service import AuthenticationService
+from app.utils.logger import get_logger
 from app.utils.validators import validate_password_strength, validate_email_format
 
-# Setup logging
 logger = get_logger(__name__)
 
+
+# ==================== CORE INITIALIZATION FUNCTIONS ====================
 
 def create_initial_roles(db: Session) -> None:
     """
@@ -45,18 +45,21 @@ def create_initial_roles(db: Session) -> None:
         {
             "name": UserRole.SUPER_ADMIN.value,
             "display_name": "Super Administrator",
-            "description": "System administrator with full access to all features",
+            "description": "System administrator with full access to all features and system management",
             "is_system_role": True,
             "hierarchy_level": "1",
-            "permissions": '["*"]'  # All permissions
+            "permissions": json.dumps(["*"])  # All permissions
         },
         {
             "name": UserRole.ADMIN.value,
             "display_name": "Administrator",
-            "description": "System administrator with administrative privileges",
+            "description": "System administrator with administrative privileges for daily operations",
             "is_system_role": True,
             "hierarchy_level": "2",
-            "permissions": '["admin.*", "user.*", "branch.*", "currency.*", "transaction.*", "report.*"]'
+            "permissions": json.dumps([
+                "admin.*", "user.*", "branch.*", "currency.*", 
+                "transaction.*", "customer.*", "vault.*", "report.*"
+            ])
         },
         {
             "name": UserRole.BRANCH_MANAGER.value,
@@ -64,31 +67,44 @@ def create_initial_roles(db: Session) -> None:
             "description": "Manager of a specific branch with branch-level administrative access",
             "is_system_role": True,
             "hierarchy_level": "3",
-            "permissions": '["branch.manage", "user.view", "transaction.*", "customer.*", "report.branch"]'
+            "permissions": json.dumps([
+                "branch.manage", "branch.balance_view", "user.view",
+                "transaction.*", "customer.*", "report.branch",
+                "report.financial", "vault.view", "vault.balance_view"
+            ])
         },
         {
             "name": UserRole.CASHIER.value,
             "display_name": "Cashier",
-            "description": "Front desk staff who handle customer transactions",
+            "description": "Front desk staff who handle customer transactions and currency exchange",
             "is_system_role": True,
             "hierarchy_level": "4",
-            "permissions": '["transaction.create", "transaction.view", "customer.*", "currency.view"]'
+            "permissions": json.dumps([
+                "transaction.view", "transaction.create", "customer.view",
+                "customer.create", "customer.update", "currency.view", "branch.balance_view"
+            ])
         },
         {
             "name": UserRole.ACCOUNTANT.value,
-            "display_name": "Accountant", 
+            "display_name": "Accountant",
             "description": "Accounting staff with access to financial records and reports",
             "is_system_role": True,
             "hierarchy_level": "4",
-            "permissions": '["transaction.view", "report.*", "currency.view", "vault.view"]'
+            "permissions": json.dumps([
+                "transaction.view", "transaction.export", "report.financial",
+                "report.generate", "customer.view", "branch.balance_view", "vault.balance_view"
+            ])
         },
         {
             "name": UserRole.AUDITOR.value,
             "display_name": "Auditor",
-            "description": "Audit staff with read-only access to all records",
+            "description": "Audit staff with read-only access to all records for compliance",
             "is_system_role": True,
             "hierarchy_level": "5",
-            "permissions": '["*.view", "report.*"]'
+            "permissions": json.dumps([
+                "transaction.view", "report.audit", "report.view",
+                "user.view", "branch.view", "security.audit_logs"
+            ])
         }
     ]
     
@@ -103,13 +119,93 @@ def create_initial_roles(db: Session) -> None:
             created_count += 1
             logger.info(f"Created role: {role_data['display_name']}")
         else:
-            logger.info(f"Role already exists: {role_data['display_name']}")
+            # Update existing role permissions if needed
+            if existing_role.permissions != role_data["permissions"]:
+                existing_role.permissions = role_data["permissions"]
+                existing_role.updated_at = datetime.utcnow()
+                logger.info(f"Updated permissions for role: {role_data['display_name']}")
     
     if created_count > 0:
         db.commit()
-        logger.info(f"Successfully created {created_count} roles")
-    else:
-        logger.info("No new roles created")
+        logger.info(f"Successfully created {created_count} new roles")
+    
+    db.commit()  # Ensure all changes are saved
+
+
+def create_superuser(db: Session) -> None:
+    """
+    Create initial superuser account.
+    
+    Args:
+        db: Database session
+    """
+    logger.info("Creating superuser account...")
+    
+    # Get superuser credentials from settings
+    superuser_email = getattr(settings, 'FIRST_SUPERUSER', 'admin@cems.local')
+    superuser_password = getattr(settings, 'FIRST_SUPERUSER_PASSWORD', 'admin123!')
+    
+    # Validate superuser email
+    if not validate_email_format(superuser_email):
+        logger.error(f"Invalid superuser email format: {superuser_email}")
+        return
+    
+    # Validate password strength
+    password_validation = validate_password_strength(superuser_password)
+    if not password_validation["is_valid"]:
+        logger.warning(f"Superuser password is weak: {password_validation['feedback']}")
+    
+    # Check if superuser already exists
+    existing_superuser = db.query(User).filter_by(email=superuser_email).first()
+    
+    if existing_superuser:
+        logger.info(f"Superuser already exists: {superuser_email}")
+        # Ensure they have superuser privileges
+        if not existing_superuser.is_superuser:
+            existing_superuser.is_superuser = True
+            existing_superuser.updated_at = datetime.utcnow()
+            db.commit()
+            logger.info("Updated existing user to superuser")
+        return
+    
+    # Create superuser
+    try:
+        superuser = User(
+            username="admin",
+            email=superuser_email,
+            hashed_password=get_password_hash(superuser_password),
+            first_name="System",
+            last_name="Administrator",
+            status=UserStatus.ACTIVE.value,
+            is_active=True,
+            is_superuser=True,
+            is_verified=True,
+            password_changed_at=datetime.utcnow()
+        )
+        
+        db.add(superuser)
+        db.commit()
+        db.refresh(superuser)
+        
+        # Assign super admin role
+        super_admin_role = db.query(Role).filter_by(name=UserRole.SUPER_ADMIN.value).first()
+        if super_admin_role:
+            user_role = UserRoleAssoc(
+                user_id=superuser.id,
+                role_id=super_admin_role.id,
+                assigned_at=datetime.utcnow()
+            )
+            db.add(user_role)
+            db.commit()
+        
+        logger.info(f"Successfully created superuser: {superuser_email}")
+        
+    except IntegrityError as e:
+        db.rollback()
+        logger.error(f"Failed to create superuser due to integrity error: {str(e)}")
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to create superuser: {str(e)}")
 
 
 def create_initial_currencies(db: Session) -> None:
@@ -121,18 +217,23 @@ def create_initial_currencies(db: Session) -> None:
     """
     logger.info("Creating initial currencies...")
     
-    # Define currency data with priorities for display order
+    # Define currency priorities for display order
     currency_priorities = {
-        CurrencyCode.USD: 1,
-        CurrencyCode.EUR: 2,
-        CurrencyCode.GBP: 3,
-        CurrencyCode.SAR: 4,
-        CurrencyCode.AED: 5,
-        CurrencyCode.EGP: 6,
-        CurrencyCode.JOD: 7,
-        CurrencyCode.KWD: 8,
-        CurrencyCode.QAR: 9,
-        CurrencyCode.BHD: 10,
+        CurrencyCode.USD: 1,   # US Dollar - Primary
+        CurrencyCode.EUR: 2,   # Euro
+        CurrencyCode.GBP: 3,   # British Pound
+        CurrencyCode.SAR: 4,   # Saudi Riyal
+        CurrencyCode.AED: 5,   # UAE Dirham
+        CurrencyCode.EGP: 6,   # Egyptian Pound
+        CurrencyCode.JOD: 7,   # Jordanian Dinar
+        CurrencyCode.KWD: 8,   # Kuwaiti Dinar
+        CurrencyCode.QAR: 9,   # Qatari Riyal
+        CurrencyCode.BHD: 10,  # Bahraini Dinar
+        CurrencyCode.OMR: 11,  # Omani Rial
+        CurrencyCode.JPY: 12,  # Japanese Yen
+        CurrencyCode.CHF: 13,  # Swiss Franc
+        CurrencyCode.CAD: 14,  # Canadian Dollar
+        CurrencyCode.AUD: 15   # Australian Dollar
     }
     
     # Special decimal places for certain currencies
@@ -140,31 +241,40 @@ def create_initial_currencies(db: Session) -> None:
         CurrencyCode.JPY: 0,  # Yen doesn't use decimal places
         CurrencyCode.KWD: 3,  # Kuwaiti Dinar uses 3 decimal places
         CurrencyCode.BHD: 3,  # Bahraini Dinar uses 3 decimal places
+        CurrencyCode.OMR: 3   # Omani Rial uses 3 decimal places
+    }
+    
+    # Minimum exchange amounts
+    min_exchange_amounts = {
+        CurrencyCode.JPY: Decimal('100'),    # Higher minimum for Yen
+        CurrencyCode.KWD: Decimal('1'),      # Lower minimum for KWD
+        CurrencyCode.BHD: Decimal('1'),      # Lower minimum for BHD
+        CurrencyCode.OMR: Decimal('1')       # Lower minimum for OMR
     }
     
     created_count = 0
-    for currency_code in CurrencyCode:
+    for currency_code in currency_priorities.keys():
         # Check if currency already exists
         existing_currency = db.query(Currency).filter_by(code=currency_code.value).first()
         
         if not existing_currency:
-            # Set display order
-            display_order = currency_priorities.get(currency_code, 99)
-            
-            # Set decimal places
+            # Set configuration values
+            display_order = currency_priorities[currency_code]
             decimal_places = special_decimal_places.get(currency_code, 2)
+            min_exchange_amount = min_exchange_amounts.get(currency_code, Decimal('10.00'))
             
             # Set base currency (USD by default)
-            is_base = currency_code.value == getattr(settings, 'DEFAULT_CURRENCY', 'USD')
+            is_base = currency_code.value == getattr(settings, 'BASE_CURRENCY', 'USD')
             
             currency = Currency(
                 code=currency_code.value,
                 name=CURRENCY_NAMES[currency_code.value],
                 symbol=CURRENCY_SYMBOLS[currency_code.value],
-                decimal_places=str(decimal_places),
-                display_order=str(display_order),
+                decimal_places=decimal_places,
+                display_order=display_order,
                 is_base_currency=is_base,
-                min_exchange_amount=Decimal('1.0000'),
+                is_active=True,
+                min_exchange_amount=min_exchange_amount,
                 description=f"Official currency: {CURRENCY_NAMES[currency_code.value]}"
             )
             
@@ -190,30 +300,29 @@ def create_initial_exchange_rates(db: Session) -> None:
     """
     logger.info("Creating initial exchange rates...")
     
-    # Get base currency
-    base_currency_code = getattr(settings, 'DEFAULT_CURRENCY', 'USD')
-    base_currency = db.query(Currency).filter_by(code=base_currency_code).first()
-    if not base_currency:
-        logger.error(f"Base currency {base_currency_code} not found")
-        return
-    
-    # Sample exchange rates (should be replaced with real rates from an API)
+    # Sample exchange rates (USD as base)
     sample_rates = {
-        "EUR": Decimal("0.85"),
-        "GBP": Decimal("0.73"),
-        "SAR": Decimal("3.75"),
-        "AED": Decimal("3.67"),
-        "EGP": Decimal("30.85"),
-        "JOD": Decimal("0.71"),
-        "KWD": Decimal("0.30"),
-        "QAR": Decimal("3.64"),
-        "BHD": Decimal("0.38"),
-        "TRY": Decimal("28.50"),
-        "JPY": Decimal("149.50"),
-        "CHF": Decimal("0.88"),
-        "CAD": Decimal("1.35"),
-        "AUD": Decimal("1.52"),
+        'EUR': Decimal('0.8500'),    # Euro
+        'GBP': Decimal('0.7300'),    # British Pound
+        'SAR': Decimal('3.7500'),    # Saudi Riyal
+        'AED': Decimal('3.6700'),    # UAE Dirham
+        'EGP': Decimal('30.9000'),   # Egyptian Pound
+        'JOD': Decimal('0.7090'),    # Jordanian Dinar
+        'KWD': Decimal('0.3070'),    # Kuwaiti Dinar
+        'QAR': Decimal('3.6400'),    # Qatari Riyal
+        'BHD': Decimal('0.3760'),    # Bahraini Dinar
+        'OMR': Decimal('0.3850'),    # Omani Rial
+        'JPY': Decimal('149.50'),    # Japanese Yen
+        'CHF': Decimal('0.8800'),    # Swiss Franc
+        'CAD': Decimal('1.3600'),    # Canadian Dollar
+        'AUD': Decimal('1.5200')     # Australian Dollar
     }
+    
+    # Get USD as base currency
+    usd_currency = db.query(Currency).filter_by(code='USD').first()
+    if not usd_currency:
+        logger.error("USD currency not found - cannot create exchange rates")
+        return
     
     created_count = 0
     for currency_code, rate in sample_rates.items():
@@ -222,33 +331,38 @@ def create_initial_exchange_rates(db: Session) -> None:
         if not target_currency:
             continue
         
-        # Check if rate already exists
+        # Check if exchange rate already exists
         existing_rate = db.query(ExchangeRate).filter_by(
-            from_currency_code=base_currency.code,
-            to_currency_code=currency_code,
-            rate_type="mid"
+            base_currency_id=usd_currency.id,
+            target_currency_id=target_currency.id
         ).first()
         
         if not existing_rate:
+            # Calculate buy and sell rates with spread
+            spread_percentage = Decimal('0.02')  # 2% spread
+            buy_rate = rate * (1 - spread_percentage)
+            sell_rate = rate * (1 + spread_percentage)
+            
             exchange_rate = ExchangeRate(
-                from_currency_id=base_currency.id,
-                to_currency_id=target_currency.id,
-                from_currency_code=base_currency.code,
-                to_currency_code=currency_code,
-                rate=rate,
-                rate_type="mid",
-                source="initial_seed",
-                buy_margin=Decimal("0.0200"),  # 2% margin
-                sell_margin=Decimal("0.0200"),  # 2% margin
-                reliability_score="80",  # Sample rates have lower reliability
-                notes="Initial sample rate for testing purposes"
+                base_currency_id=usd_currency.id,
+                target_currency_id=target_currency.id,
+                base_currency_code='USD',
+                target_currency_code=currency_code,
+                buy_rate=buy_rate,
+                sell_rate=sell_rate,
+                mid_rate=rate,
+                effective_date=datetime.utcnow().date(),
+                expires_date=datetime.utcnow().date() + timedelta(days=1),
+                is_active=True,
+                source='MANUAL_INIT',
+                created_by_user_id=None  # System created
             )
             
             db.add(exchange_rate)
             created_count += 1
-            logger.info(f"Created exchange rate: {base_currency.code}/{currency_code} = {rate}")
+            logger.info(f"Created exchange rate: USD/{currency_code} = {rate}")
         else:
-            logger.info(f"Exchange rate already exists: {base_currency.code}/{currency_code}")
+            logger.info(f"Exchange rate already exists: USD/{currency_code}")
     
     if created_count > 0:
         db.commit()
@@ -257,265 +371,177 @@ def create_initial_exchange_rates(db: Session) -> None:
         logger.info("No new exchange rates created")
 
 
-def create_superuser(
-    db: Session, 
-    email: Optional[str] = None, 
-    password: Optional[str] = None,
-    username: Optional[str] = None
-) -> Optional[User]:
-    """
-    Create initial superuser account.
-    
-    Args:
-        db: Database session
-        email: Superuser email (from settings if not provided)
-        password: Superuser password (from settings if not provided)
-        username: Superuser username (generated if not provided)
-        
-    Returns:
-        User: Created superuser or None if already exists
-    """
-    logger.info("Creating superuser account...")
-    
-    # Use settings or provided values
-    admin_email = email or getattr(settings, 'FIRST_SUPERUSER', 'admin@cems.com')
-    admin_password = password or getattr(settings, 'FIRST_SUPERUSER_PASSWORD', 'changeme123!')
-    admin_username = username or 'admin'
-    
-    # Check if superuser already exists
-    existing_user = db.query(User).filter_by(email=admin_email).first()
-    if existing_user:
-        logger.info(f"Superuser already exists: {admin_email}")
-        return existing_user
-    
-    # Get super admin role
-    super_admin_role = db.query(Role).filter_by(name=UserRole.SUPER_ADMIN.value).first()
-    if not super_admin_role:
-        logger.error("Super admin role not found. Create roles first.")
-        return None
-    
-    # Create superuser
-    superuser = User(
-        username=admin_username,
-        email=admin_email,
-        hashed_password=get_password_hash(admin_password),
-        first_name="System",
-        last_name="Administrator",
-        status=UserStatus.ACTIVE.value,
-        is_active=True,
-        is_superuser=True,
-        is_verified=True
-    )
-    
-    db.add(superuser)
-    db.commit()
-    db.refresh(superuser)
-    
-    # Assign super admin role (if UserRole model supports add_role method)
-    try:
-        # Create user role association
-        user_role = UserRoleAssoc(
-            user_id=superuser.id,
-            role_id=super_admin_role.id,
-            assigned_by=superuser.id,
-            is_active=True
-        )
-        db.add(user_role)
-        db.commit()
-    except Exception as e:
-        logger.warning(f"Could not assign role to superuser: {e}")
-    
-    logger.info(f"Superuser created successfully: {admin_email}")
-    logger.warning(f"Default password is '{admin_password}' - CHANGE THIS IMMEDIATELY IN PRODUCTION!")
-    
-    return superuser
-
-
 def create_initial_branches(db: Session) -> None:
     """
-    Create initial branches including main branch.
+    Create initial branches for the system.
     
     Args:
         db: Database session
     """
     logger.info("Creating initial branches...")
     
-    # Main branch data
-    main_branch_data = {
-        "branch_code": "BR001",
-        "name": "Main Branch",
-        "name_arabic": "الفرع الرئيسي",
-        "address_line1": "123 Business District, Downtown",
-        "city": "Riyadh",
-        "country": "Saudi Arabia",
-        "postal_code": "11564",
-        "phone_number": "+966-11-123-4567",
-        "email": "main@cems.com",
-        "branch_type": "main",
-        "status": "active",
-        "is_main_branch": True,
-        "daily_transaction_limit": Decimal('500000.00'),
-        "single_transaction_limit": Decimal('100000.00'),
-        "has_vault": True,
-        "vault_capacity_usd": Decimal('1000000.00'),
-        "opened_date": datetime.now(),
-        "license_number": "CR-2024-001",
-        "notes": "Main branch and headquarters for CEMS operations"
-    }
-    
-    # Check if main branch already exists
-    existing_main = db.query(Branch).filter_by(branch_code="BR001").first()
-    
-    if not existing_main:
-        main_branch = Branch(**main_branch_data)
-        db.add(main_branch)
-        db.commit()
-        db.refresh(main_branch)
-        logger.info("Created main branch: BR001")
-    else:
-        logger.info("Main branch already exists: BR001")
-    
-    # Additional sample branches
-    sample_branches = [
+    branches_data = [
         {
-            "branch_code": "BR002",
-            "name": "North Branch",
-            "name_arabic": "الفرع الشمالي",
-            "address_line1": "456 Al-Malaz District",
-            "city": "Riyadh",
-            "country": "Saudi Arabia",
-            "postal_code": "11565",
-            "phone_number": "+966-11-234-5678",
-            "email": "north@cems.com",
-            "branch_type": "standard",
+            "branch_code": "MAIN",
+            "branch_name": "Main Branch",
+            "address": "123 Main Street, City Center",
+            "phone_number": "+1-555-0001",
+            "email": "main@cems.local",
+            "manager_name": "Main Branch Manager",
+            "is_main_branch": True,
+            "is_active": True,
             "status": "active",
-            "daily_transaction_limit": Decimal('200000.00'),
-            "single_transaction_limit": Decimal('50000.00'),
-            "has_vault": True,
-            "vault_capacity_usd": Decimal('500000.00'),
-            "opened_date": datetime.now(),
-            "license_number": "CR-2024-002"
+            "daily_limit": Decimal('100000.00'),
+            "monthly_limit": Decimal('2000000.00'),
+            "timezone": "UTC",
+            "business_hours": "08:00-17:00",
+            "description": "Main headquarters branch"
         },
         {
-            "branch_code": "BR003",
-            "name": "East Branch",
-            "name_arabic": "الفرع الشرقي", 
-            "address_line1": "789 King Fahd Road",
-            "city": "Dammam",
-            "country": "Saudi Arabia",
-            "postal_code": "31111",
-            "phone_number": "+966-13-345-6789",
-            "email": "east@cems.com",
-            "branch_type": "standard",
+            "branch_code": "BR001",
+            "branch_name": "Downtown Branch",
+            "address": "456 Business District, Downtown",
+            "phone_number": "+1-555-0002",
+            "email": "downtown@cems.local",
+            "manager_name": "Downtown Manager",
+            "is_main_branch": False,
+            "is_active": True,
             "status": "active",
-            "daily_transaction_limit": Decimal('150000.00'),
-            "single_transaction_limit": Decimal('30000.00'),
-            "has_vault": True,
-            "vault_capacity_usd": Decimal('300000.00'),
-            "opened_date": datetime.now(),
-            "license_number": "CR-2024-003"
+            "daily_limit": Decimal('50000.00'),
+            "monthly_limit": Decimal('1000000.00'),
+            "timezone": "UTC",
+            "business_hours": "09:00-18:00",
+            "description": "Downtown business district branch"
+        },
+        {
+            "branch_code": "BR002",
+            "branch_name": "Airport Branch",
+            "address": "International Airport, Terminal 1",
+            "phone_number": "+1-555-0003",
+            "email": "airport@cems.local",
+            "manager_name": "Airport Manager",
+            "is_main_branch": False,
+            "is_active": True,
+            "status": "active",
+            "daily_limit": Decimal('75000.00'),
+            "monthly_limit": Decimal('1500000.00'),
+            "timezone": "UTC",
+            "business_hours": "06:00-22:00",
+            "description": "Airport terminal currency exchange"
         }
     ]
     
     created_count = 0
-    for branch_data in sample_branches:
+    for branch_data in branches_data:
+        # Check if branch already exists
         existing_branch = db.query(Branch).filter_by(branch_code=branch_data["branch_code"]).first()
         
         if not existing_branch:
             branch = Branch(**branch_data)
             db.add(branch)
             created_count += 1
-            logger.info(f"Created branch: {branch_data['branch_code']} - {branch_data['name']}")
+            logger.info(f"Created branch: {branch_data['branch_name']} ({branch_data['branch_code']})")
         else:
             logger.info(f"Branch already exists: {branch_data['branch_code']}")
     
     if created_count > 0:
         db.commit()
-        logger.info(f"Successfully created {created_count} sample branches")
+        logger.info(f"Successfully created {created_count} branches")
+    else:
+        logger.info("No new branches created")
 
 
 def create_initial_vault(db: Session) -> None:
     """
-    Create main vault and initial vault balances.
+    Create initial main vault and vault balances.
     
     Args:
         db: Database session
     """
-    logger.info("Creating main vault...")
+    logger.info("Creating initial vault...")
     
     # Check if main vault already exists
-    existing_vault = db.query(Vault).filter_by(vault_code="VLT001").first()
+    existing_vault = db.query(Vault).filter_by(is_main_vault=True).first()
     
-    if not existing_vault:
-        main_vault = Vault(
-            vault_code="VLT001",
-            vault_name="Main Central Vault",
-            vault_type="main",
-            location_description="Central vault located in main headquarters building",
-            building="CEMS Headquarters",
-            floor="B1",
-            room="V001",
-            capacity_rating="High Security - Class III",
-            security_level="maximum",
-            status="active",
-            is_main_vault=True,
-            requires_dual_control=True,
-            operating_hours_start="06:00",
-            operating_hours_end="22:00",
-            audit_frequency_days=30,
-            insurance_coverage_amount=Decimal('10000000.00'),
-            notes="Main vault for all currency exchange operations"
-        )
-        
-        db.add(main_vault)
-        db.commit()
-        db.refresh(main_vault)
-        
-        logger.info("Created main vault: VLT001")
-        
-        # Create initial vault balances for major currencies
-        major_currencies = ["USD", "EUR", "GBP", "SAR"]
-        initial_balances = {
-            "USD": Decimal('100000.0000'),
-            "EUR": Decimal('75000.0000'),
-            "GBP": Decimal('50000.0000'),
-            "SAR": Decimal('375000.0000')
-        }
-        
-        for currency_code in major_currencies:
-            currency = db.query(Currency).filter_by(code=currency_code).first()
-            if currency:
-                vault_balance = VaultBalance(
-                    vault_id=main_vault.id,
-                    currency_id=currency.id,
-                    currency_code=currency_code,
-                    current_balance=initial_balances.get(currency_code, Decimal('0.0000')),
-                    minimum_balance=Decimal('5000.0000'),
-                    reorder_threshold=Decimal('20000.0000'),
-                    critical_threshold=Decimal('10000.0000'),
-                    is_active=True
-                )
-                db.add(vault_balance)
-                logger.info(f"Created vault balance: {currency_code} = {initial_balances.get(currency_code, 0)}")
-        
-        db.commit()
-        logger.info("Main vault and balances created successfully")
-    else:
+    if existing_vault:
         logger.info("Main vault already exists")
+        return
+    
+    # Create main vault
+    main_vault = Vault(
+        vault_name="Main Vault",
+        vault_code="VAULT001",
+        vault_type="main",
+        location="Main Branch - Secure Area",
+        is_main_vault=True,
+        is_active=True,
+        status="operational",
+        security_level="high",
+        access_hours="24/7",
+        description="Primary vault for main branch operations"
+    )
+    
+    db.add(main_vault)
+    db.commit()
+    db.refresh(main_vault)
+    
+    logger.info(f"Created main vault: {main_vault.vault_name}")
+    
+    # Create vault balances for major currencies
+    major_currencies = ['USD', 'EUR', 'GBP', 'SAR', 'AED']
+    vault_balance_count = 0
+    
+    for currency_code in major_currencies:
+        currency = db.query(Currency).filter_by(code=currency_code).first()
+        if not currency:
+            continue
+        
+        # Check if vault balance already exists
+        existing_balance = db.query(VaultBalance).filter_by(
+            vault_id=main_vault.id,
+            currency_code=currency_code
+        ).first()
+        
+        if not existing_balance:
+            # Set initial vault balances (larger amounts than branches)
+            initial_amount = Decimal('500000.00')  # 500K initial balance
+            minimum_balance = Decimal('100000.00')  # 100K minimum
+            maximum_balance = Decimal('2000000.00')  # 2M maximum
+            
+            vault_balance = VaultBalance(
+                vault_id=main_vault.id,
+                currency_id=currency.id,
+                currency_code=currency_code,
+                current_balance=initial_amount,
+                reserved_balance=Decimal('0.00'),
+                available_balance=initial_amount,
+                minimum_balance=minimum_balance,
+                maximum_balance=maximum_balance,
+                reorder_threshold=minimum_balance * 2,
+                is_active=True
+            )
+            
+            db.add(vault_balance)
+            vault_balance_count += 1
+            logger.info(f"Created vault balance: {currency_code} - {initial_amount}")
+    
+    if vault_balance_count > 0:
+        db.commit()
+        logger.info(f"Successfully created {vault_balance_count} vault balances")
 
 
 def create_initial_branch_balances(db: Session) -> None:
     """
-    Create initial branch balances for all branches.
+    Create initial branch balances for all currencies.
     
     Args:
         db: Database session
     """
     logger.info("Creating initial branch balances...")
     
-    # Get all branches
-    branches = db.query(Branch).filter_by(status="active").all()
-    major_currencies = ["USD", "EUR", "GBP", "SAR"]
+    # Get all active branches
+    branches = db.query(Branch).filter_by(is_active=True).all()
+    major_currencies = ['USD', 'EUR', 'GBP', 'SAR', 'AED']
     
     created_count = 0
     for branch in branches:
@@ -533,19 +559,21 @@ def create_initial_branch_balances(db: Session) -> None:
             if not existing_balance:
                 # Set initial balances based on branch type
                 if branch.is_main_branch:
+                    initial_amount = Decimal('100000.00')
+                    minimum_balance = Decimal('20000.00')
+                    maximum_balance = Decimal('500000.00')
+                else:
                     initial_amount = Decimal('50000.00')
                     minimum_balance = Decimal('10000.00')
                     maximum_balance = Decimal('200000.00')
-                else:
-                    initial_amount = Decimal('20000.00')
-                    minimum_balance = Decimal('5000.00')
-                    maximum_balance = Decimal('100000.00')
                 
                 branch_balance = BranchBalance(
                     branch_id=branch.id,
                     currency_id=currency.id,
                     currency_code=currency_code,
                     current_balance=initial_amount,
+                    reserved_balance=Decimal('0.00'),
+                    available_balance=initial_amount,
                     minimum_balance=minimum_balance,
                     maximum_balance=maximum_balance,
                     reorder_threshold=minimum_balance * 2,
@@ -554,13 +582,119 @@ def create_initial_branch_balances(db: Session) -> None:
                 
                 db.add(branch_balance)
                 created_count += 1
-                logger.info(f"Created balance for {branch.branch_code}-{currency_code}: {initial_amount}")
+                logger.info(f"Created balance: {branch.branch_code}/{currency_code} - {initial_amount}")
     
     if created_count > 0:
         db.commit()
         logger.info(f"Successfully created {created_count} branch balances")
     else:
         logger.info("No new branch balances created")
+
+
+# ==================== DEVELOPMENT AND TESTING DATA ====================
+
+def create_development_users(db: Session) -> None:
+    """
+    Create additional users for development and testing.
+    
+    Args:
+        db: Database session
+    """
+    if getattr(settings, 'ENVIRONMENT', 'development') == 'production':
+        logger.info("Skipping development users creation in production")
+        return
+    
+    logger.info("Creating development users...")
+    
+    user_repo = UserRepository(db)
+    
+    # Development users data
+    dev_users_data = [
+        {
+            "username": "branch_manager",
+            "email": "manager@cems.dev",
+            "password": "Manager123!",
+            "first_name": "Branch",
+            "last_name": "Manager",
+            "roles": [UserRole.BRANCH_MANAGER],
+            "is_verified": True
+        },
+        {
+            "username": "cashier1",
+            "email": "cashier1@cems.dev",
+            "password": "Cashier123!",
+            "first_name": "John",
+            "last_name": "Cashier",
+            "roles": [UserRole.CASHIER],
+            "is_verified": True
+        },
+        {
+            "username": "cashier2",
+            "email": "cashier2@cems.dev",
+            "password": "Cashier123!",
+            "first_name": "Jane",
+            "last_name": "Cashier",
+            "roles": [UserRole.CASHIER],
+            "is_verified": True
+        },
+        {
+            "username": "accountant",
+            "email": "accountant@cems.dev",
+            "password": "Account123!",
+            "first_name": "Bob",
+            "last_name": "Accountant",
+            "roles": [UserRole.ACCOUNTANT],
+            "is_verified": True
+        },
+        {
+            "username": "auditor",
+            "email": "auditor@cems.dev",
+            "password": "Auditor123!",
+            "first_name": "Alice",
+            "last_name": "Auditor",
+            "roles": [UserRole.AUDITOR],
+            "is_verified": True
+        }
+    ]
+    
+    created_count = 0
+    for user_data in dev_users_data:
+        # Check if user already exists
+        existing_user = user_repo.get_by_email(user_data["email"])
+        
+        if not existing_user:
+            try:
+                # Create user
+                user = user_repo.create_user(
+                    username=user_data["username"],
+                    email=user_data["email"],
+                    hashed_password=get_password_hash(user_data["password"]),
+                    first_name=user_data["first_name"],
+                    last_name=user_data["last_name"],
+                    status=UserStatus.ACTIVE,
+                    is_active=True,
+                    is_verified=user_data["is_verified"]
+                )
+                
+                # Assign roles
+                for role in user_data["roles"]:
+                    try:
+                        user_repo.assign_role(user.id, role.value)
+                    except Exception as e:
+                        logger.warning(f"Failed to assign role {role.value} to {user_data['username']}: {str(e)}")
+                
+                created_count += 1
+                logger.info(f"Created development user: {user_data['username']}")
+                
+            except Exception as e:
+                logger.error(f"Failed to create development user {user_data['username']}: {str(e)}")
+        else:
+            logger.info(f"Development user already exists: {user_data['username']}")
+    
+    if created_count > 0:
+        logger.info(f"Successfully created {created_count} development users")
+    else:
+        logger.info("No new development users created")
 
 
 def create_sample_customers(db: Session) -> None:
@@ -570,80 +704,68 @@ def create_sample_customers(db: Session) -> None:
     Args:
         db: Database session
     """
+    if getattr(settings, 'ENVIRONMENT', 'development') == 'production':
+        logger.info("Skipping sample customers creation in production")
+        return
+    
     logger.info("Creating sample customers...")
     
-    # Sample customer data
-    customers_data = [
+    # Get main branch
+    main_branch = db.query(Branch).filter_by(is_main_branch=True).first()
+    if not main_branch:
+        logger.warning("Main branch not found - cannot create sample customers")
+        return
+    
+    sample_customers_data = [
         {
-            "customer_code": "CUS000001",
-            "customer_type": "individual",
+            "customer_code": "CUST001",
             "first_name": "Ahmed",
             "last_name": "Al-Rashid",
-            "first_name_arabic": "أحمد",
-            "last_name_arabic": "الراشد",
-            "id_type": "national_id",
-            "id_number": "1234567890",
-            "nationality": "SA",
-            "mobile_number": "+966501234567",
-            "email": "ahmed.rashid@email.com",
-            "status": "active",
-            "classification": "standard",
-            "risk_level": "low",
-            "kyc_status": "verified",
-            "kyc_verification_date": datetime.now().date(),
-            "daily_limit": Decimal('50000.00'),
-            "monthly_limit": Decimal('500000.00'),
-            "preferred_language": "ar"
+            "email": "ahmed.rashid@example.com",
+            "phone_number": "+971-50-1234567",
+            "id_type": "passport",
+            "id_number": "A1234567",
+            "nationality": "UAE",
+            "date_of_birth": datetime(1985, 5, 15).date(),
+            "address": "Dubai Marina, UAE",
+            "customer_type": "individual",
+            "preferred_currency": "AED",
+            "branch_id": main_branch.id
         },
         {
-            "customer_code": "CUS000002", 
-            "customer_type": "individual",
+            "customer_code": "CUST002",
             "first_name": "Sarah",
             "last_name": "Johnson",
+            "email": "sarah.johnson@example.com",
+            "phone_number": "+1-555-9876543",
             "id_type": "passport",
-            "id_number": "P123456789",
-            "nationality": "US",
-            "mobile_number": "+1234567890",
-            "email": "sarah.johnson@email.com",
-            "status": "active",
-            "classification": "premium",
-            "risk_level": "low",
-            "kyc_status": "verified",
-            "kyc_verification_date": datetime.now().date(),
-            "daily_limit": Decimal('100000.00'),
-            "monthly_limit": Decimal('1000000.00'),
-            "preferred_language": "en"
+            "id_number": "US9876543",
+            "nationality": "USA",
+            "date_of_birth": datetime(1990, 8, 22).date(),
+            "address": "New York, USA",
+            "customer_type": "individual",
+            "preferred_currency": "USD",
+            "branch_id": main_branch.id
         },
         {
-            "customer_code": "CUS000003",
-            "customer_type": "corporate",
-            "company_name": "Al-Majd Trading Company",
-            "company_name_arabic": "شركة المجد للتجارة",
-            "id_type": "commercial_registration",
-            "id_number": "CR123456789",
-            "nationality": "SA",
-            "mobile_number": "+966112345678",
-            "email": "info@almajd-trading.com",
-            "status": "active",
-            "classification": "vip",
-            "risk_level": "medium",
-            "kyc_status": "verified",
-            "kyc_verification_date": datetime.now().date(),
-            "daily_limit": Decimal('500000.00'),
-            "monthly_limit": Decimal('5000000.00'),
-            "preferred_language": "ar"
+            "customer_code": "CUST003",
+            "first_name": "Mohammed",
+            "last_name": "Al-Saud",
+            "email": "mohammed.saud@example.com",
+            "phone_number": "+966-50-7777777",
+            "id_type": "national_id",
+            "id_number": "1234567890",
+            "nationality": "Saudi Arabia",
+            "date_of_birth": datetime(1980, 12, 10).date(),
+            "address": "Riyadh, Saudi Arabia",
+            "customer_type": "individual",
+            "preferred_currency": "SAR",
+            "branch_id": main_branch.id
         }
     ]
     
-    # Get registration branch (first branch for simplicity)
-    registration_branch = db.query(Branch).first()
-    
     created_count = 0
-    for customer_data in customers_data:
-        # Add registration branch
-        if registration_branch:
-            customer_data["registration_branch_id"] = registration_branch.id
-            
+    for customer_data in sample_customers_data:
         # Check if customer already exists
         existing_customer = db.query(Customer).filter_by(
             customer_code=customer_data["customer_code"]
@@ -653,9 +775,9 @@ def create_sample_customers(db: Session) -> None:
             customer = Customer(**customer_data)
             db.add(customer)
             created_count += 1
-            logger.info(f"Created customer: {customer_data['customer_code']} - {customer_data.get('first_name', customer_data.get('company_name', 'Unknown'))}")
+            logger.info(f"Created sample customer: {customer_data['customer_code']}")
         else:
-            logger.info(f"Customer already exists: {customer_data['customer_code']}")
+            logger.info(f"Sample customer already exists: {customer_data['customer_code']}")
     
     if created_count > 0:
         db.commit()
@@ -666,624 +788,46 @@ def create_sample_customers(db: Session) -> None:
 
 def assign_users_to_branches(db: Session) -> None:
     """
-    Assign superuser to main branch and setup branch managers.
+    Assign users to branches for proper access control.
     
     Args:
         db: Database session
     """
     logger.info("Assigning users to branches...")
     
-    # Get superuser and main branch
-    superuser = db.query(User).filter_by(is_superuser=True).first()
+    # Get main branch
     main_branch = db.query(Branch).filter_by(is_main_branch=True).first()
+    if not main_branch:
+        logger.warning("Main branch not found - cannot assign users")
+        return
     
-    if superuser and main_branch and not superuser.branch_id:
-        superuser.branch_id = main_branch.id
-        main_branch.branch_manager_id = superuser.id
+    # Get users that need branch assignment
+    users_without_branch = db.query(User).filter_by(branch_id=None).all()
+    
+    updated_count = 0
+    for user in users_without_branch:
+        # Skip superuser
+        if user.is_superuser:
+            continue
+        
+        # Assign to main branch by default
+        user.branch_id = main_branch.id
+        user.updated_at = datetime.utcnow()
+        updated_count += 1
+        logger.info(f"Assigned user {user.username} to {main_branch.branch_name}")
+    
+    if updated_count > 0:
         db.commit()
-        logger.info(f"Assigned superuser to main branch: {main_branch.name}")
+        logger.info(f"Successfully assigned {updated_count} users to branches")
     else:
-        logger.info("User-branch assignments already exist or entities not found")
+        logger.info("No users needed branch assignment")
 
 
-def verify_initialization() -> Dict[str, Any]:
+# ==================== VERIFICATION AND MAINTENANCE ====================
+
+def verify_initialization(db: Session) -> Dict[str, Any]:
     """
-    Verify that database initialization was successful.
-    
-    Returns:
-        dict: Verification results with counts and status
-    """
-    logger.info("Verifying database initialization...")
-    
-    verification_results = {
-        "status": "success",
-        "timestamp": datetime.now().isoformat(),
-        "counts": {},
-        "errors": [],
-        "warnings": []
-    }
-    
-    try:
-        with db_manager.get_session_context() as db:
-            # Count each entity type
-            verification_results["counts"] = {
-                "roles": db.query(Role).count(),
-                "currencies": db.query(Currency).count(),
-                "exchange_rates": db.query(ExchangeRate).count(),
-                "users": db.query(User).count(),
-                "branches": db.query(Branch).count(),
-                "customers": db.query(Customer).count(),
-                "vaults": db.query(Vault).count(),
-                "vault_balances": db.query(VaultBalance).count(),
-                "branch_balances": db.query(BranchBalance).count()
-            }
-            
-            # Check for critical entities
-            if verification_results["counts"]["roles"] == 0:
-                verification_results["errors"].append("No roles found")
-            
-            if verification_results["counts"]["currencies"] == 0:
-                verification_results["errors"].append("No currencies found")
-                
-            if verification_results["counts"]["users"] == 0:
-                verification_results["errors"].append("No users found")
-                
-            # Check for superuser
-            superuser = db.query(User).filter_by(is_superuser=True).first()
-            if not superuser:
-                verification_results["errors"].append("No superuser found")
-            
-            # Check for main branch
-            main_branch = db.query(Branch).filter_by(is_main_branch=True).first()
-            if not main_branch:
-                verification_results["warnings"].append("No main branch found")
-            
-            # Check for main vault
-            main_vault = db.query(Vault).filter_by(is_main_vault=True).first()
-            if not main_vault:
-                verification_results["warnings"].append("No main vault found")
-            
-            # Set overall status
-            if verification_results["errors"]:
-                verification_results["status"] = "error"
-            elif verification_results["warnings"]:
-                verification_results["status"] = "warning"
-                
-    except Exception as e:
-        verification_results["status"] = "error"
-        verification_results["errors"].append(f"Verification failed: {str(e)}")
-        logger.error(f"Database verification failed: {e}", exc_info=True)
-    
-    # Log results
-    logger.info(f"Verification completed with status: {verification_results['status']}")
-    for entity, count in verification_results["counts"].items():
-        logger.info(f"  {entity}: {count}")
-    
-    if verification_results["errors"]:
-        for error in verification_results["errors"]:
-            logger.error(f"  ERROR: {error}")
-    
-    if verification_results["warnings"]:
-        for warning in verification_results["warnings"]:
-            logger.warning(f"  WARNING: {warning}")
-    
-    return verification_results
-
-
-def get_database_health() -> Dict[str, Any]:
-    """
-    Get comprehensive database health information.
-    
-    Returns:
-        dict: Database health status and metrics
-    """
-    health_data = {
-        "status": "unknown",
-        "timestamp": datetime.now().isoformat(),
-        "connection": False,
-        "tables": {},
-        "performance": {},
-        "errors": []
-    }
-    
-    try:
-        # Check connection
-        health_data["connection"] = db_manager.check_connection()
-        
-        if health_data["connection"]:
-            with db_manager.get_session_context() as db:
-                # Check table existence and record counts
-                tables_to_check = [
-                    ("roles", Role),
-                    ("currencies", Currency),
-                    ("exchange_rates", ExchangeRate),
-                    ("users", User),
-                    ("branches", Branch),
-                    ("customers", Customer),
-                    ("vaults", Vault),
-                    ("vault_balances", VaultBalance),
-                    ("branch_balances", BranchBalance)
-                ]
-                
-                for table_name, model_class in tables_to_check:
-                    try:
-                        count = db.query(model_class).count()
-                        health_data["tables"][table_name] = {
-                            "exists": True,
-                            "count": count
-                        }
-                    except Exception as e:
-                        health_data["tables"][table_name] = {
-                            "exists": False,
-                            "error": str(e)
-                        }
-                        health_data["errors"].append(f"Table {table_name}: {str(e)}")
-                
-                # Set overall status
-                if health_data["errors"]:
-                    health_data["status"] = "degraded"
-                elif all(table["exists"] for table in health_data["tables"].values()):
-                    health_data["status"] = "healthy"
-                else:
-                    health_data["status"] = "unhealthy"
-        else:
-            health_data["status"] = "unhealthy"
-            health_data["errors"].append("Database connection failed")
-            
-    except Exception as e:
-        health_data["status"] = "error"
-        health_data["errors"].append(f"Health check failed: {str(e)}")
-        logger.error(f"Database health check failed: {e}", exc_info=True)
-    
-    return health_data
-
-
-def init_db() -> None:
-    """
-    Initialize database with complete initial data.
-    This function should be called during application startup.
-    """
-    logger.info("Starting comprehensive database initialization...")
-    
-    try:
-        # Check database connection
-        if not db_manager.check_connection():
-            logger.error("Database connection failed")
-            return
-        
-        # Create tables if they don't exist (for development only)
-        if getattr(settings, 'ENVIRONMENT', 'development') == "development":
-            db_manager.create_tables()
-            logger.info("Database tables created/verified")
-        
-        # Get database session
-        with db_manager.get_session_context() as db:
-            # Create initial data in correct dependency order
-            logger.info("Creating initial data in dependency order...")
-            
-            create_initial_roles(db)
-            create_initial_currencies(db)
-            create_initial_exchange_rates(db)
-            create_superuser(db)
-            create_initial_branches(db)
-            create_initial_vault(db)
-            create_initial_branch_balances(db)
-            create_sample_customers(db)
-            assign_users_to_branches(db)
-        
-        logger.info("Database initialization completed successfully")
-        
-        # Verify initialization
-        verification = verify_initialization()
-        if verification["status"] == "error":
-            logger.error("Database initialization verification failed")
-            for error in verification["errors"]:
-                logger.error(f"  - {error}")
-        else:
-            logger.info("Database initialization verification passed")
-        
-    except Exception as e:
-        logger.error(f"Database initialization failed: {e}", exc_info=True)
-        raise
-
-
-def reset_db() -> None:
-    """
-    Reset database by dropping and recreating all tables.
-    WARNING: This will delete all data!
-    """
-    if getattr(settings, 'ENVIRONMENT', 'development') == "production":
-        raise RuntimeError("Cannot reset database in production environment")
-    
-    logger.warning("Resetting database - ALL DATA WILL BE LOST!")
-    
-    try:
-        # Drop and recreate tables
-        db_manager.drop_tables()
-        db_manager.create_tables()
-        
-        # Reinitialize with seed data
-        init_db()
-        
-        logger.info("Database reset completed successfully")
-        
-    except Exception as e:
-        logger.error(f"Database reset failed: {e}", exc_info=True)
-        raise
-
-
-def quick_setup(reset: bool = False, verify: bool = True) -> Dict[str, Any]:
-    """
-    Quick setup function for CEMS database.
-    
-    Args:
-        reset: Whether to reset database before setup
-        verify: Whether to verify setup after initialization
-        
-    Returns:
-        dict: Setup results
-    """
-    results = {
-        "success": False,
-        "steps_completed": [],
-        "errors": [],
-        "verification": None
-    }
-    
-    try:
-        if reset:
-            logger.info("Resetting database...")
-            reset_db()
-            results["steps_completed"].append("database_reset")
-        
-        logger.info("Initializing database...")
-        init_db()
-        results["steps_completed"].append("database_init")
-        
-        if verify:
-            logger.info("Verifying database...")
-            verification = verify_initialization()
-            results["verification"] = verification
-            results["steps_completed"].append("verification")
-            
-            if verification["status"] in ["success", "warning"]:
-                results["success"] = True
-        else:
-            results["success"] = True
-    
-    except Exception as e:
-        results["errors"].append(str(e))
-        logger.error(f"Quick setup failed: {e}")
-    
-    return results
-
-
-if __name__ == "__main__":
-    """Run database initialization from command line."""
-    import sys
-    import argparse
-    
-    parser = argparse.ArgumentParser(description="Initialize CEMS database")
-    parser.add_argument(
-        "--reset", 
-        action="store_true", 
-        help="Reset database (WARNING: Deletes all data)"
-    )
-    parser.add_argument(
-        "--verify-only",
-        action="store_true",
-        help="Only verify database without initialization"
-    )
-    parser.add_argument(
-        "--health-check",
-        action="store_true",
-        help="Perform database health check"
-    )
-    
-    args = parser.parse_args()
-    
-    if args.health_check:
-        health = get_database_health()
-        print(f"Database Status: {health['status']}")
-        print("Table Status:")
-        for table, info in health['tables'].items():
-            status = "✓" if info['exists'] else "✗"
-            count = info.get('count', 'N/A')
-            print(f"  {status} {table}: {count} records")
-        
-        if health['errors']:
-            print("Errors:")
-            for error in health['errors']:
-                print(f"  - {error}")
-        
-        sys.exit(0 if health['status'] in ['healthy', 'degraded'] else 1)
-    
-    if args.verify_only:
-        verification = verify_initialization()
-        print(f"Verification Status: {verification['status']}")
-        print("Entity Counts:")
-        for entity, count in verification['counts'].items():
-            print(f"  {entity}: {count}")
-        
-        if verification['errors']:
-            print("Errors:")
-            for error in verification['errors']:
-                print(f"  - {error}")
-        
-        if verification['warnings']:
-            print("Warnings:")
-            for warning in verification['warnings']:
-                print(f"  - {warning}")
-        
-        sys.exit(0 if verification['status'] in ['success', 'warning'] else 1)
-    
-    if args.reset:
-        if input("Are you sure you want to reset the database? (yes/no): ").lower() != 'yes':
-            print("Database reset cancelled.")
-            sys.exit(0)
-        reset_db()
-    else:
-        init_db()
-    
-    print("Database initialization completed.")
-    
-    
-"""
-Additional initialization functions for CEMS database setup.
-These are supplements to the existing init_db.py file.
-"""
-
-
-
-def create_development_users(db: Session) -> None:
-    """
-    Create additional development/testing users.
-    
-    Args:
-        db: Database session
-    """
-    try:
-        logger.info("Creating development users...")
-        
-        user_repo = UserRepository(db)
-        
-        # Development users data
-        dev_users = [
-            {
-                "username": "branch_manager_1",
-                "email": "branch.manager1@cems.local",
-                "password": "BranchManager123!",
-                "first_name": "Ahmed",
-                "last_name": "Al-Mansouri",
-                "roles": [UserRole.BRANCH_MANAGER.value, UserRole.CASHIER.value],
-                "branch_id": 1,
-                "is_verified": True,
-                "status": UserStatus.ACTIVE.value
-            },
-            {
-                "username": "cashier_1",
-                "email": "cashier1@cems.local", 
-                "password": "Cashier123!",
-                "first_name": "Fatima",
-                "last_name": "Al-Zahra",
-                "roles": [UserRole.CASHIER.value],
-                "branch_id": 1,
-                "is_verified": True,
-                "status": UserStatus.ACTIVE.value
-            },
-            {
-                "username": "accountant_1",
-                "email": "accountant1@cems.local",
-                "password": "Accountant123!",
-                "first_name": "Omar",
-                "last_name": "Hassan",
-                "roles": [UserRole.ACCOUNTANT.value],
-                "branch_id": 1,
-                "is_verified": True,
-                "status": UserStatus.ACTIVE.value
-            },
-            {
-                "username": "auditor_1",
-                "email": "auditor1@cems.local",
-                "password": "Auditor123!",
-                "first_name": "Layla",
-                "last_name": "Al-Ahmad",
-                "roles": [UserRole.AUDITOR.value],
-                "branch_id": None,  # Auditors can access all branches
-                "is_verified": True,
-                "status": UserStatus.ACTIVE.value
-            }
-        ]
-        
-        for user_data in dev_users:
-            # Check if user already exists
-            existing_user = user_repo.get_by_username(user_data["username"])
-            if existing_user:
-                logger.info(f"Development user {user_data['username']} already exists")
-                continue
-            
-            # Extract roles and password
-            roles = user_data.pop("roles", [])
-            password = user_data.pop("password")
-            
-            # Create user
-            user = user_repo.create_user(
-                **user_data,
-                hashed_password=get_password_hash(password)
-            )
-            
-            # Assign roles
-            for role_name in roles:
-                try:
-                    user_repo.assign_role(user.id, role_name)
-                except Exception as e:
-                    logger.warning(f"Failed to assign role {role_name} to {user_data['username']}: {str(e)}")
-            
-            logger.info(f"Created development user: {user_data['username']} with roles: {roles}")
-        
-        db.commit()
-        logger.info("Development users created successfully")
-        
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Error creating development users: {str(e)}")
-        raise
-
-
-def create_test_data(db: Session) -> None:
-    """
-    Create test data for development and testing.
-    
-    Args:
-        db: Database session
-    """
-    try:
-        logger.info("Creating test data...")
-        
-        # Create test customers
-        create_test_customers(db)
-        
-        # Create sample exchange rates
-        create_sample_exchange_rates(db)
-        
-        # Create test transactions (if transaction models are available)
-        # create_test_transactions(db)
-        
-        db.commit()
-        logger.info("Test data created successfully")
-        
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Error creating test data: {str(e)}")
-        raise
-
-
-def create_test_customers(db: Session) -> None:
-    """
-    Create test customers for development.
-    
-    Args:
-        db: Database session
-    """
-    try:
-        from app.db.models.customer import Customer
-        
-        test_customers = [
-            {
-                "customer_code": "CUST001",
-                "customer_type": "individual",
-                "first_name": "Mohammed",
-                "last_name": "Al-Rashid",
-                "first_name_arabic": "محمد",
-                "last_name_arabic": "الراشد",
-                "id_type": "passport",
-                "id_number": "P123456789",
-                "id_issuing_country": "ARE",
-                "nationality": "UAE",
-                "email": "mohammed.rashid@email.com",
-                "phone_number": "+971501234567",
-                "preferred_language": "ar",
-                "risk_level": "low",
-                "is_active": True,
-                "created_by": 1
-            },
-            {
-                "customer_code": "CUST002", 
-                "customer_type": "business",
-                "company_name": "Al-Noor Trading LLC",
-                "company_name_arabic": "شركة النور للتجارة ذ.م.م",
-                "business_type": "trading",
-                "id_type": "trade_license",
-                "id_number": "TL987654321",
-                "id_issuing_country": "ARE",
-                "email": "info@alnoor-trading.com",
-                "phone_number": "+971501234568",
-                "preferred_language": "en",
-                "risk_level": "medium",
-                "is_active": True,
-                "created_by": 1
-            }
-        ]
-        
-        for customer_data in test_customers:
-            # Check if customer already exists
-            existing = db.query(Customer).filter_by(customer_code=customer_data["customer_code"]).first()
-            if existing:
-                continue
-                
-            customer = Customer(**customer_data)
-            db.add(customer)
-            logger.info(f"Created test customer: {customer_data['customer_code']}")
-        
-        db.flush()
-        
-    except Exception as e:
-        logger.error(f"Error creating test customers: {str(e)}")
-        raise
-
-
-def create_sample_exchange_rates(db: Session) -> None:
-    """
-    Create sample exchange rates for testing.
-    
-    Args:
-        db: Database session
-    """
-    try:
-        from app.db.models.currency import ExchangeRate
-        
-        # Sample exchange rates (USD as base)
-        sample_rates = [
-            {"from_currency": "AED", "to_currency": "USD", "rate": Decimal("0.2722"), "margin": Decimal("0.02")},
-            {"from_currency": "USD", "to_currency": "AED", "rate": Decimal("3.6725"), "margin": Decimal("0.02")},
-            {"from_currency": "EUR", "to_currency": "USD", "rate": Decimal("1.0850"), "margin": Decimal("0.015")},
-            {"from_currency": "USD", "to_currency": "EUR", "rate": Decimal("0.9217"), "margin": Decimal("0.015")},
-            {"from_currency": "GBP", "to_currency": "USD", "rate": Decimal("1.2650"), "margin": Decimal("0.015")},
-            {"from_currency": "USD", "to_currency": "GBP", "rate": Decimal("0.7905"), "margin": Decimal("0.015")},
-            {"from_currency": "SAR", "to_currency": "USD", "rate": Decimal("0.2667"), "margin": Decimal("0.02")},
-            {"from_currency": "USD", "to_currency": "SAR", "rate": Decimal("3.7500"), "margin": Decimal("0.02")},
-        ]
-        
-        for rate_data in sample_rates:
-            # Check if rate already exists
-            existing = db.query(ExchangeRate).filter_by(
-                from_currency=rate_data["from_currency"],
-                to_currency=rate_data["to_currency"]
-            ).first()
-            
-            if existing:
-                # Update existing rate
-                existing.buy_rate = rate_data["rate"]
-                existing.sell_rate = rate_data["rate"] * (1 + rate_data["margin"])
-                existing.margin = rate_data["margin"]
-                existing.updated_at = datetime.utcnow()
-                existing.is_active = True
-            else:
-                # Create new rate
-                exchange_rate = ExchangeRate(
-                    from_currency=rate_data["from_currency"],
-                    to_currency=rate_data["to_currency"],
-                    buy_rate=rate_data["rate"],
-                    sell_rate=rate_data["rate"] * (1 + rate_data["margin"]),
-                    margin=rate_data["margin"],
-                    effective_from=datetime.utcnow(),
-                    is_active=True,
-                    created_by=1
-                )
-                db.add(exchange_rate)
-            
-            logger.info(f"Updated exchange rate: {rate_data['from_currency']} -> {rate_data['to_currency']}")
-        
-        db.flush()
-        
-    except Exception as e:
-        logger.error(f"Error creating sample exchange rates: {str(e)}")
-        raise
-
-
-def verify_repository_integration(db: Session) -> Dict[str, Any]:
-    """
-    Verify that repository and service layers are working correctly.
+    Verify that all initialization completed successfully.
     
     Args:
         db: Database session
@@ -1291,305 +835,297 @@ def verify_repository_integration(db: Session) -> Dict[str, Any]:
     Returns:
         Dict[str, Any]: Verification results
     """
+    logger.info("Verifying database initialization...")
+    
     verification_results = {
-        "repository_tests": {},
-        "service_tests": {},
-        "integration_tests": {},
-        "overall_status": "unknown"
+        "status": "success",
+        "timestamp": datetime.utcnow().isoformat(),
+        "counts": {},
+        "checks": {},
+        "errors": [],
+        "warnings": []
     }
     
     try:
-        logger.info("Verifying repository and service integration...")
-        
-        # Test UserRepository
-        user_repo = UserRepository(db)
-        
-        # Test basic repository operations
-        verification_results["repository_tests"] = {
-            "user_count": user_repo.count(),
-            "superuser_exists": user_repo.exists(is_superuser=True),
-            "active_users": user_repo.count() - len(user_repo.find_by(is_active=False)),
-            "repository_methods_available": [
-                hasattr(user_repo, method) for method in [
-                    'create_user', 'get_by_username', 'get_by_email', 
-                    'assign_role', 'remove_role', 'search_users'
-                ]
-            ]
+        # Count entities
+        verification_results["counts"] = {
+            "roles": db.query(Role).count(),
+            "currencies": db.query(Currency).count(),
+            "exchange_rates": db.query(ExchangeRate).count(),
+            "users": db.query(User).count(),
+            "branches": db.query(Branch).count(),
+            "vaults": db.query(Vault).count(),
+            "vault_balances": db.query(VaultBalance).count(),
+            "branch_balances": db.query(BranchBalance).count(),
+            "customers": db.query(Customer).count()
         }
         
-        # Test UserService
-        user_service = UserService(db)
-        
-        verification_results["service_tests"] = {
-            "service_initialized": user_service is not None,
-            "user_repo_accessible": hasattr(user_service, 'user_repo'),
-            "service_methods_available": [
-                hasattr(user_service, method) for method in [
-                    'create_user', 'update_user', 'search_users',
-                    'assign_roles', 'get_user_statistics'
-                ]
-            ]
+        # Critical checks
+        verification_results["checks"] = {
+            "has_roles": verification_results["counts"]["roles"] > 0,
+            "has_currencies": verification_results["counts"]["currencies"] > 0,
+            "has_superuser": db.query(User).filter_by(is_superuser=True).count() > 0,
+            "has_main_branch": db.query(Branch).filter_by(is_main_branch=True).count() > 0,
+            "has_main_vault": db.query(Vault).filter_by(is_main_vault=True).count() > 0,
+            "has_base_currency": db.query(Currency).filter_by(is_base_currency=True).count() > 0,
+            "has_exchange_rates": verification_results["counts"]["exchange_rates"] > 0
         }
         
-        # Test AuthenticationService
-        auth_service = AuthenticationService(db)
+        # Check for critical missing components
+        for check_name, check_result in verification_results["checks"].items():
+            if not check_result:
+                error_message = f"Critical check failed: {check_name}"
+                verification_results["errors"].append(error_message)
+                logger.error(error_message)
         
-        verification_results["service_tests"]["auth_service"] = {
-            "service_initialized": auth_service is not None,
-            "auth_methods_available": [
-                hasattr(auth_service, method) for method in [
-                    'authenticate_user', 'refresh_access_token',
-                    'change_password', 'setup_two_factor'
-                ]
-            ]
-        }
+        # Additional validations
+        # Check if all roles have users
+        roles_with_users = db.query(Role).join(UserRoleAssoc).distinct().count()
+        total_roles = verification_results["counts"]["roles"]
+        if roles_with_users < total_roles:
+            verification_results["warnings"].append(f"Some roles have no assigned users ({roles_with_users}/{total_roles})")
         
-        # Integration tests
-        try:
-            # Test user statistics
-            stats = user_service.get_user_statistics()
-            verification_results["integration_tests"]["user_statistics"] = {
-                "total_users": stats.total_users if hasattr(stats, 'total_users') else 0,
-                "active_users": stats.active_users if hasattr(stats, 'active_users') else 0
-            }
-        except Exception as e:
-            verification_results["integration_tests"]["user_statistics_error"] = str(e)
+        # Check if all currencies have exchange rates (except base currency)
+        currencies_with_rates = db.query(Currency).join(ExchangeRate, 
+                                                          Currency.id == ExchangeRate.target_currency_id).distinct().count()
+        non_base_currencies = db.query(Currency).filter_by(is_base_currency=False).count()
+        if currencies_with_rates < non_base_currencies:
+            verification_results["warnings"].append(f"Some currencies missing exchange rates ({currencies_with_rates}/{non_base_currencies})")
         
-        # Check if all critical components are working
-        all_repo_methods = all(verification_results["repository_tests"]["repository_methods_available"])
-        all_service_methods = all(verification_results["service_tests"]["service_methods_available"])
-        all_auth_methods = all(verification_results["service_tests"]["auth_service"]["auth_methods_available"])
-        
-        if all_repo_methods and all_service_methods and all_auth_methods:
-            verification_results["overall_status"] = "success"
+        # Set overall status
+        if verification_results["errors"]:
+            verification_results["status"] = "failed"
+        elif verification_results["warnings"]:
+            verification_results["status"] = "warning"
         else:
-            verification_results["overall_status"] = "partial"
+            verification_results["status"] = "success"
         
-        logger.info(f"Repository and service verification completed: {verification_results['overall_status']}")
+        logger.info(f"Initialization verification completed: {verification_results['status']}")
         
     except Exception as e:
-        verification_results["overall_status"] = "failed"
-        verification_results["error"] = str(e)
-        logger.error(f"Repository and service verification failed: {str(e)}")
+        verification_results["status"] = "error"
+        verification_results["errors"].append(f"Verification failed: {str(e)}")
+        logger.error(f"Verification failed: {str(e)}")
     
     return verification_results
 
 
-def initialize_complete_system(db: Session, create_dev_data: bool = False) -> Dict[str, Any]:
+def test_services_integration(db: Session) -> Dict[str, Any]:
     """
-    Complete system initialization including all components.
-    
-    Args:
-        db: Database session
-        create_dev_data: Whether to create development data
-        
-    Returns:
-        Dict[str, Any]: Initialization results
-    """
-    initialization_results = {
-        "core_data": False,
-        "dev_users": False,
-        "test_data": False,
-        "verification": {},
-        "errors": [],
-        "timestamp": datetime.utcnow().isoformat()
-    }
-    
-    try:
-        logger.info("Starting complete system initialization...")
-        
-        # 1. Initialize core data (from existing init_db functions)
-        try:
-            # Assuming these functions exist in the original init_db.py
-            # create_initial_roles(db)
-            # create_initial_currencies(db) 
-            # create_superuser(db)
-            # create_main_branch_and_vault(db)
-            initialization_results["core_data"] = True
-            logger.info("Core data initialization completed")
-        except Exception as e:
-            initialization_results["errors"].append(f"Core data error: {str(e)}")
-        
-        # 2. Create development users
-        if create_dev_data:
-            try:
-                create_development_users(db)
-                initialization_results["dev_users"] = True
-                logger.info("Development users created")
-            except Exception as e:
-                initialization_results["errors"].append(f"Dev users error: {str(e)}")
-            
-            # 3. Create test data
-            try:
-                create_test_data(db)
-                initialization_results["test_data"] = True
-                logger.info("Test data created")
-            except Exception as e:
-                initialization_results["errors"].append(f"Test data error: {str(e)}")
-        
-        # 4. Verify integration
-        try:
-            verification_result = verify_repository_integration(db)
-            initialization_results["verification"] = verification_result
-            logger.info("System verification completed")
-        except Exception as e:
-            initialization_results["errors"].append(f"Verification error: {str(e)}")
-        
-        # Final commit
-        db.commit()
-        
-        logger.info("Complete system initialization finished successfully")
-        
-    except Exception as e:
-        db.rollback()
-        initialization_results["errors"].append(f"System initialization error: {str(e)}")
-        logger.error(f"System initialization failed: {str(e)}")
-    
-    return initialization_results
-
-
-def cleanup_development_data(db: Session) -> Dict[str, Any]:
-    """
-    Clean up development and test data.
+    Test integration with repositories and services.
     
     Args:
         db: Database session
         
     Returns:
-        Dict[str, Any]: Cleanup results
+        Dict[str, Any]: Integration test results
     """
-    cleanup_results = {
-        "dev_users_removed": 0,
-        "test_customers_removed": 0,
-        "test_rates_removed": 0,
+    logger.info("Testing services integration...")
+    
+    test_results = {
+        "status": "success",
+        "timestamp": datetime.utcnow().isoformat(),
+        "repository_tests": {},
+        "service_tests": {},
         "errors": []
     }
     
     try:
-        logger.info("Starting development data cleanup...")
-        
+        # Test UserRepository
         user_repo = UserRepository(db)
+        test_results["repository_tests"]["user_repository"] = {
+            "can_get_users": bool(user_repo.get_active_users_count() >= 0),
+            "can_check_username": bool(user_repo.check_username_exists("admin")),
+            "can_get_by_role": bool(len(user_repo.get_users_by_role(UserRole.SUPER_ADMIN.value)) >= 0)
+        }
         
-        # Remove development users
-        dev_usernames = ["branch_manager_1", "cashier_1", "accountant_1", "auditor_1"]
-        for username in dev_usernames:
-            user = user_repo.get_by_username(username)
-            if user:
-                user_repo.delete(user.id, soft_delete=True)
-                cleanup_results["dev_users_removed"] += 1
+        # Test UserService
+        user_service = UserService(db)
+        test_results["service_tests"]["user_service"] = {
+            "can_get_statistics": False,
+            "error": None
+        }
         
-        # Remove test customers
         try:
-            from app.db.models.customer import Customer
-            test_customers = db.query(Customer).filter(
-                Customer.customer_code.like("CUST%")
-            ).all()
+            stats = user_service.get_user_statistics()
+            test_results["service_tests"]["user_service"]["can_get_statistics"] = bool(stats.total_users >= 0)
+        except Exception as e:
+            test_results["service_tests"]["user_service"]["error"] = str(e)
+        
+        # Test AuthenticationService
+        auth_service = AuthenticationService(db)
+        test_results["service_tests"]["auth_service"] = {
+            "can_check_password_strength": False,
+            "error": None
+        }
+        
+        try:
+            from app.schemas.auth import PasswordStrengthRequest
+            from pydantic import SecretStr
             
-            for customer in test_customers:
-                customer.deleted_at = datetime.utcnow()
-                cleanup_results["test_customers_removed"] += 1
+            password_check = auth_service.check_password_strength(
+                PasswordStrengthRequest(password=SecretStr("TestPassword123!"))
+            )
+            test_results["service_tests"]["auth_service"]["can_check_password_strength"] = bool(password_check.score >= 0)
         except Exception as e:
-            cleanup_results["errors"].append(f"Customer cleanup error: {str(e)}")
+            test_results["service_tests"]["auth_service"]["error"] = str(e)
         
-        # Remove test exchange rates  
-        try:
-            from app.db.models.currency import ExchangeRate
-            test_rates = db.query(ExchangeRate).filter(
-                ExchangeRate.created_by == 1
-            ).all()
-            
-            for rate in test_rates:
-                rate.is_active = False
-                rate.deleted_at = datetime.utcnow()
-                cleanup_results["test_rates_removed"] += 1
-        except Exception as e:
-            cleanup_results["errors"].append(f"Exchange rate cleanup error: {str(e)}")
-        
-        db.commit()
-        logger.info(f"Development data cleanup completed: {cleanup_results}")
-        
-    except Exception as e:
-        db.rollback()
-        cleanup_results["errors"].append(f"Cleanup error: {str(e)}")
-        logger.error(f"Development data cleanup failed: {str(e)}")
-    
-    return cleanup_results
-
-
-# Utility function for database health check
-def perform_health_check(db: Session) -> Dict[str, Any]:
-    """
-    Perform comprehensive health check on the database and services.
-    
-    Args:
-        db: Database session
-        
-    Returns:
-        Dict[str, Any]: Health check results
-    """
-    health_status = {
-        "database": "unknown",
-        "repositories": "unknown", 
-        "services": "unknown",
-        "authentication": "unknown",
-        "overall": "unknown",
-        "details": {},
-        "timestamp": datetime.utcnow().isoformat()
-    }
-    
-    try:
-        # Database connectivity check
-        try:
-            db.execute("SELECT 1")
-            health_status["database"] = "healthy"
-        except Exception as e:
-            health_status["database"] = "unhealthy"
-            health_status["details"]["database_error"] = str(e)
-        
-        # Repository health check
-        try:
-            user_repo = UserRepository(db)
-            user_count = user_repo.count()
-            health_status["repositories"] = "healthy"
-            health_status["details"]["user_count"] = user_count
-        except Exception as e:
-            health_status["repositories"] = "unhealthy"
-            health_status["details"]["repository_error"] = str(e)
-        
-        # Service health check
-        try:
-            user_service = UserService(db)
-            auth_service = AuthenticationService(db)
-            health_status["services"] = "healthy"
-        except Exception as e:
-            health_status["services"] = "unhealthy"
-            health_status["details"]["service_error"] = str(e)
-        
-        # Authentication system check
-        try:
-            from app.core.security import security_manager
-            # Test token generation
-            test_token = security_manager.generate_secure_token()
-            health_status["authentication"] = "healthy" if test_token else "unhealthy"
-        except Exception as e:
-            health_status["authentication"] = "unhealthy"
-            health_status["details"]["auth_error"] = str(e)
-        
-        # Overall health determination
-        all_healthy = all(
-            status == "healthy" 
-            for status in [
-                health_status["database"],
-                health_status["repositories"], 
-                health_status["services"],
-                health_status["authentication"]
-            ]
+        # Check overall success
+        all_repo_tests = all(test_results["repository_tests"]["user_repository"].values())
+        all_service_tests = (
+            test_results["service_tests"]["user_service"]["can_get_statistics"] and
+            test_results["service_tests"]["auth_service"]["can_check_password_strength"]
         )
         
-        health_status["overall"] = "healthy" if all_healthy else "degraded"
+        if not all_repo_tests or not all_service_tests:
+            test_results["status"] = "partial"
+        
+        logger.info(f"Services integration test completed: {test_results['status']}")
         
     except Exception as e:
-        health_status["overall"] = "critical"
-        health_status["details"]["critical_error"] = str(e)
+        test_results["status"] = "failed"
+        test_results["errors"].append(str(e))
+        logger.error(f"Services integration test failed: {str(e)}")
     
-    return health_status
+    return test_results
+
+
+# ==================== MAIN INITIALIZATION FUNCTION ====================
+
+def init_db() -> None:
+    """
+    Main database initialization function.
+    
+    This function should be called during application startup to ensure
+    all required initial data is present in the database.
+    """
+    logger.info("Starting comprehensive CEMS database initialization...")
+    
+    try:
+        # Get database session
+        db = SessionLocal()
+        
+        try:
+            # Execute initialization steps in correct order
+            logger.info("Step 1: Creating initial roles...")
+            create_initial_roles(db)
+            
+            logger.info("Step 2: Creating superuser...")
+            create_superuser(db)
+            
+            logger.info("Step 3: Creating initial currencies...")
+            create_initial_currencies(db)
+            
+            logger.info("Step 4: Creating initial exchange rates...")
+            create_initial_exchange_rates(db)
+            
+            logger.info("Step 5: Creating initial branches...")
+            create_initial_branches(db)
+            
+            logger.info("Step 6: Creating initial vault...")
+            create_initial_vault(db)
+            
+            logger.info("Step 7: Creating initial branch balances...")
+            create_initial_branch_balances(db)
+            
+            logger.info("Step 8: Creating development users...")
+            create_development_users(db)
+            
+            logger.info("Step 9: Creating sample customers...")
+            create_sample_customers(db)
+            
+            logger.info("Step 10: Assigning users to branches...")
+            assign_users_to_branches(db)
+            
+            logger.info("Database initialization completed successfully!")
+            
+            # Verify initialization
+            logger.info("Step 11: Verifying initialization...")
+            verification = verify_initialization(db)
+            
+            if verification["status"] == "failed":
+                logger.error("Database initialization verification failed!")
+                for error in verification["errors"]:
+                    logger.error(f"  - {error}")
+            else:
+                logger.info("Database initialization verification passed!")
+                if verification["warnings"]:
+                    for warning in verification["warnings"]:
+                        logger.warning(f"  - {warning}")
+            
+            # Test services integration
+            logger.info("Step 12: Testing services integration...")
+            integration_test = test_services_integration(db)
+            
+            if integration_test["status"] == "failed":
+                logger.error("Services integration test failed!")
+                for error in integration_test["errors"]:
+                    logger.error(f"  - {error}")
+            else:
+                logger.info("Services integration test passed!")
+            
+            # Final summary
+            logger.info("=== INITIALIZATION SUMMARY ===")
+            logger.info(f"Roles: {verification['counts']['roles']}")
+            logger.info(f"Users: {verification['counts']['users']}")
+            logger.info(f"Currencies: {verification['counts']['currencies']}")
+            logger.info(f"Exchange Rates: {verification['counts']['exchange_rates']}")
+            logger.info(f"Branches: {verification['counts']['branches']}")
+            logger.info(f"Vaults: {verification['counts']['vaults']}")
+            logger.info(f"Customers: {verification['counts']['customers']}")
+            logger.info("===============================")
+            
+        finally:
+            db.close()
+            
+    except Exception as e:
+        logger.error(f"Database initialization failed: {str(e)}", exc_info=True)
+        raise
+
+
+def reset_database() -> None:
+    """
+    Reset database for development purposes.
+    
+    WARNING: This will delete all data!
+    """
+    if getattr(settings, 'ENVIRONMENT', 'development') == 'production':
+        raise RuntimeError("Cannot reset database in production environment!")
+    
+    logger.warning("RESETTING DATABASE - ALL DATA WILL BE LOST!")
+    
+    try:
+        # This would typically involve dropping and recreating tables
+        # Implementation depends on your database setup
+        logger.warning("Database reset is not implemented - manual reset required")
+        
+        # Re-initialize after reset
+        # init_db()
+        
+    except Exception as e:
+        logger.error(f"Database reset failed: {str(e)}")
+        raise
+
+
+# ==================== STANDALONE EXECUTION ====================
+
+if __name__ == "__main__":
+    """
+    Allow running initialization directly from command line.
+    """
+    import sys
+    
+    if len(sys.argv) > 1:
+        if sys.argv[1] == "reset":
+            reset_database()
+        elif sys.argv[1] == "verify":
+            db = SessionLocal()
+            try:
+                result = verify_initialization(db)
+                print(json.dumps(result, indent=2, default=str))
+            finally:
+                db.close()
+        else:
+            print("Usage: python init_db.py [reset|verify]")
+    else:
+        init_db()
