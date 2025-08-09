@@ -1,130 +1,179 @@
 # ==================== DEVELOPMENT REQUIREMENTS ====================
+# This file contains dependencies needed only for development and testing
 # Install with: pip install -r requirements-dev.txt
 
-# Include main requirements
+# First install production requirements
 -r requirements.txt
 
 # ==================== TESTING FRAMEWORK ====================
-pytest==7.4.3
-pytest-asyncio==0.21.1
-pytest-cov==4.1.0
-pytest-mock==3.12.0
-pytest-xdist==3.5.0  # Parallel testing
-pytest-benchmark==4.0.0  # Performance testing
-pytest-html==4.1.1  # HTML test reports
-pytest-json-report==1.5.0  # JSON test reports
-factory-boy==3.3.0  # Test data factories
+pytest>=7.4.3,<8.0.0                    # Modern testing framework
+pytest-asyncio>=0.21.1,<0.22.0          # Async testing support  
+pytest-cov>=4.1.0,<5.0.0                # Coverage reporting
+pytest-mock>=3.12.0,<4.0.0              # Advanced mocking utilities
+pytest-xdist>=3.4.0,<4.0.0              # Parallel test execution
+pytest-html>=4.1.1,<5.0.0               # HTML test reports
+pytest-json-report>=1.5.0,<2.0.0        # JSON test reports
+pytest-benchmark>=4.0.0,<5.0.0          # Performance benchmarking
+
+# ==================== TEST DATA & FACTORIES ====================
+factory-boy>=3.3.0,<4.0.0               # Test data generation
+faker>=20.1.0,<21.0.0                   # Fake data generation
+mimesis>=11.1.0,<12.0.0                 # Alternative fake data generator
 
 # ==================== CODE QUALITY & FORMATTING ====================
-black==23.11.0
-isort==5.12.0
-flake8==6.1.0
-mypy==1.7.1
-pre-commit==3.6.0
-bandit==1.7.5  # Security linting
-safety==2.3.5  # Dependency vulnerability scanner
+black>=23.11.0,<24.0.0                  # Opinionated code formatter
+isort>=5.12.0,<6.0.0                    # Import statement organizer
+autoflake>=2.2.1,<3.0.0                 # Remove unused imports/variables
+autopep8>=2.0.4,<3.0.0                  # PEP 8 auto-formatter
 
-# ==================== CODE ANALYSIS ====================
-pylint==3.0.3
-flake8-docstrings==1.7.0
-flake8-import-order==0.18.2
-flake8-bugbear==23.12.2
-autopep8==2.0.4
+# ==================== LINTING & STATIC ANALYSIS ====================
+flake8>=6.1.0,<7.0.0                    # Code style enforcement
+flake8-docstrings>=1.7.0,<2.0.0         # Docstring style checking
+flake8-import-order>=0.18.2,<0.19.0     # Import order checking
+flake8-bugbear>=23.12.2,<24.0.0         # Additional bug finding
+flake8-comprehensions>=3.14.0,<4.0.0    # Comprehension improvements
+flake8-simplify>=0.21.0,<0.22.0         # Code simplification suggestions
 
 # ==================== TYPE CHECKING ====================
-mypy==1.7.1
-types-redis==4.6.0.11
-types-requests==2.31.0.10
-types-python-dateutil==2.8.19.14
+mypy>=1.7.1,<2.0.0                      # Static type checker
+types-python-dateutil>=2.8.19,<3.0.0    # Type stubs for dateutil
+types-requests>=2.31.0,<3.0.0           # Type stubs for requests
+types-redis>=4.6.0,<5.0.0               # Type stubs for redis
+sqlalchemy[mypy]>=2.0.23,<3.0.0         # SQLAlchemy type checking plugin
+
+# ==================== SECURITY SCANNING ====================
+bandit>=1.7.5,<2.0.0                    # Security vulnerability scanner
+safety>=2.3.5,<3.0.0                    # Check dependencies for vulnerabilities
+semgrep>=1.45.0,<2.0.0                  # Static analysis security scanner
 
 # ==================== DOCUMENTATION ====================
-sphinx==7.2.6
-sphinx-rtd-theme==2.0.0
-sphinxcontrib-openapi==0.8.1
-mkdocs==1.5.3
-mkdocs-material==9.4.14
+mkdocs>=1.5.3,<2.0.0                    # Documentation site generator
+mkdocs-material>=9.4.8,<10.0.0          # Material Design theme
+mkdocs-swagger-ui-tag>=0.6.8,<0.7.0     # Swagger UI integration
+mkdocstrings>=0.24.0,<0.25.0            # Code documentation from docstrings
+mkdocstrings-python>=1.7.5,<2.0.0       # Python-specific documentation
+
+# ==================== API DOCUMENTATION ====================
+sphinx>=7.2.6,<8.0.0                    # Documentation generator
+sphinx-rtd-theme>=1.3.0,<2.0.0          # Read the Docs theme
+sphinx-autodoc-typehints>=1.25.2,<2.0.0 # Type hints in documentation
 
 # ==================== DEVELOPMENT TOOLS ====================
-ipython==8.18.1
-jupyter==1.0.0
-notebook==7.0.6
-ipdb==0.13.13  # Interactive debugger
-rich==13.7.0  # Rich terminal output
-click==8.1.7  # CLI development
-
-# ==================== PERFORMANCE PROFILING ====================
-py-spy==0.3.14
-memory-profiler==0.61.0
-line-profiler==4.1.1
-django-debug-toolbar==4.2.0  # For API debugging
+ipython>=8.17.2,<9.0.0                  # Enhanced interactive shell
+ipdb>=0.13.13,<0.14.0                   # Enhanced debugger
+rich>=13.7.0,<14.0.0                    # Rich terminal output
+click>=8.1.7,<9.0.0                     # Command-line interface toolkit
 
 # ==================== DATABASE DEVELOPMENT ====================
-pgcli==4.0.1  # PostgreSQL CLI with autocomplete
-faker==20.1.0  # Generate fake data for testing
+alembic>=1.13.0,<2.0.0                  # Database migrations (also in main)
+sqlalchemy-utils>=0.41.1,<0.42.0        # Additional SQLAlchemy utilities
+sqlalchemy-stubs>=0.4                   # Type stubs for SQLAlchemy
 
-# ==================== API TESTING ====================
-httpx==0.25.2  # Already in main requirements but needed for testing
-requests-mock==1.11.0
-responses==0.24.1
-
-# ==================== MONITORING DEVELOPMENT ====================
-locust==2.17.0  # Load testing
-prometheus-client==0.19.0  # Already in main requirements
-
-# ==================== DEVELOPMENT SERVERS ====================
-watchdog==3.0.0  # File watching for auto-reload
-pytest-watch==4.2.0
-
-# ==================== ENVIRONMENT MANAGEMENT ====================
-python-dotenv==1.0.0  # Already in main requirements
-environs==11.0.0  # Alternative env management
-
-# ==================== DEBUGGING & LOGGING ====================
-icecream==2.1.3  # Better print debugging
-colorama==0.4.6  # Colored terminal output
-
-# ==================== SECURITY TESTING ====================
-bandit[toml]==1.7.5
-semgrep==1.45.0
-
-# ==================== DEPENDENCY MANAGEMENT ====================
-pip-tools==7.3.0
-pipenv==2023.11.15
-poetry==1.7.1
-
-# ==================== MOCK & FIXTURES ====================
-freezegun==1.2.2  # Mock time/date
-responses==0.24.1  # Mock HTTP responses
-pytest-freezegun==0.4.2
-
-# ==================== DATABASE TESTING ====================
-pytest-postgresql==5.0.0
-sqlalchemy-utils==0.41.1
-
-# ==================== COVERAGE REPORTING ====================
-coverage[toml]==7.3.2
-codecov==2.1.13
-
-# ==================== LINTING PLUGINS ====================
-flake8-comprehensions==3.14.0
-flake8-simplify==0.21.0
-flake8-annotations==3.0.1
-flake8-cognitive-complexity==0.1.0
-
-# ==================== JUPYTER EXTENSIONS ====================
-jupyterlab==4.0.9
-jupyterlab-code-formatter==2.2.1
-
-# ==================== GIT HOOKS ====================
-pre-commit==3.6.0  # Already listed above
-
-# ==================== CONTAINER DEVELOPMENT ====================
-docker-compose==1.29.2
-
-# ==================== API DOCUMENTATION TOOLS ====================
-redoc-cli==0.13.21
-swagger-codegen-cli==3.0.46
+# ==================== PERFORMANCE PROFILING ====================
+py-spy>=0.3.14,<0.4.0                   # Sampling profiler
+memory-profiler>=0.61.0,<0.62.0         # Memory usage profiler
+line-profiler>=4.1.1,<5.0.0             # Line-by-line profiler
+pympler>=0.9,<1.0                       # Memory analysis toolkit
 
 # ==================== DEVELOPMENT UTILITIES ====================
-python-json-logger==2.0.7  # Already in main requirements
-structlog==23.2.0  # Already in main requirements
+python-dotenv>=1.0.0,<2.0.0             # Environment variable management
+watchdog>=3.0.0,<4.0.0                  # File system event monitoring
+colorama>=0.4.6,<0.5.0                  # Cross-platform colored terminal text
+tqdm>=4.66.1,<5.0.0                     # Progress bars
+
+# ==================== LOAD TESTING ====================
+locust>=2.17.0,<3.0.0                   # Load testing framework
+httpx>=0.25.2,<0.26.0                   # Async HTTP client for testing
+
+# ==================== MOCK SERVICES ====================
+responses>=0.24.1,<0.25.0               # Mock HTTP requests
+httpretty>=1.1.4,<2.0.0                 # HTTP request mocking
+freezegun>=1.2.2,<2.0.0                 # Mock datetime
+time-machine>=2.13.0,<3.0.0             # Alternative datetime mocking
+
+# ==================== CI/CD TOOLS ====================
+pre-commit>=3.6.0,<4.0.0                # Git hooks framework
+commitizen>=3.13.0,<4.0.0               # Conventional commits
+semantic-version>=2.10.0,<3.0.0         # Semantic versioning utilities
+
+# ==================== JUPYTER NOTEBOOKS (Optional) ====================
+# Uncomment if you plan to use Jupyter for development or analysis
+# jupyter>=1.0.0,<2.0.0                   # Jupyter notebook server
+# jupyterlab>=4.0.8,<5.0.0                # JupyterLab interface
+# notebook>=7.0.6,<8.0.0                  # Jupyter notebook interface
+
+# ==================== DATABASE ADMIN TOOLS ====================
+# Uncomment if you need database administration tools
+# pgcli>=4.0.1,<5.0.0                     # PostgreSQL CLI with autocomplete
+# mycli>=1.27.0,<2.0.0                    # MySQL CLI with autocomplete (if using MySQL)
+
+# ==================== ADDITIONAL ANALYSIS TOOLS ====================
+vulture>=2.10,<3.0                      # Find dead code
+radon>=6.0.1,<7.0.0                     # Code complexity analysis
+xenon>=0.9.1,<0.10.0                    # Monitor code complexity
+
+# ==================== DEVELOPMENT SERVERS ====================
+# Already included in main requirements, but worth noting
+# uvicorn[standard]>=0.24.0,<0.25.0       # ASGI server for development
+
+# ==================== ENVIRONMENT MANAGEMENT ====================
+python-decouple>=3.8,<4.0               # Environment variable handling
+environs>=10.0.0,<11.0.0                # Environment parsing
+
+# ==================== EMAIL TESTING ====================
+aiosmtpd>=1.4.4.post2,<2.0.0            # SMTP server for testing emails
+
+# ==================== FILE MONITORING ====================
+watchfiles>=0.21.0,<0.22.0              # Fast file watching
+
+# ==================== DEVELOPMENT NOTES ====================
+#
+# Installation Instructions:
+# 1. Create virtual environment: python -m venv venv
+# 2. Activate virtual environment: source venv/bin/activate (Linux/Mac) or venv\Scripts\activate (Windows)
+# 3. Install development dependencies: pip install -r requirements-dev.txt
+# 4. Set up pre-commit hooks: pre-commit install
+# 5. Run tests: pytest
+# 6. Run linting: flake8 app tests
+# 7. Format code: black app tests && isort app tests
+# 8. Type checking: mypy app
+# 9. Security scan: bandit -r app
+# 10. Start development server: uvicorn app.main:app --reload
+#
+# Pre-commit Configuration:
+# Create .pre-commit-config.yaml with hooks for:
+# - black (code formatting)
+# - isort (import sorting)
+# - flake8 (linting)
+# - mypy (type checking)
+# - bandit (security)
+# - trailing whitespace removal
+# - end-of-file fixing
+#
+# VS Code Extensions Recommended:
+# - Python
+# - Pylance
+# - Black Formatter
+# - isort
+# - GitLens
+# - Thunder Client (API testing)
+#
+# PyCharm Plugins Recommended:
+# - Database Tools and SQL
+# - HTTP Client
+# - Python Security
+# - Requirements
+#
+# Testing Strategy:
+# - Unit tests for services and utilities
+# - Integration tests for API endpoints
+# - Database tests with test database
+# - Performance tests for critical paths
+# - Security tests for authentication
+#
+# Code Quality Targets:
+# - Test coverage: >90%
+# - Cyclomatic complexity: <10
+# - Maintainability index: >70
+# - Security score: A grade
+# - Type coverage: >95%

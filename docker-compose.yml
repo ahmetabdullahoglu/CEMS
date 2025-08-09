@@ -1,72 +1,148 @@
-# ===============================================
-# CEMS - Currency Exchange Management System
-# Docker Compose Configuration for Production
-# ===============================================
+# ==================== CEMS DOCKER COMPOSE CONFIGURATION ====================
+# Production-ready Docker Compose setup for CEMS API
+# Author: CEMS Development Team
+# Date: 2024
 
 version: '3.8'
 
-networks:
-  cems-network:
-    driver: bridge
-    name: cems-network
-
-volumes:
-  postgres_data:
-    driver: local
-    name: cems_postgres_data
-  redis_data:
-    driver: local
-    name: cems_redis_data
-  app_logs:
-    driver: local
-    name: cems_app_logs
-  backup_data:
-    driver: local
-    name: cems_backup_data
-
+# ==================== SERVICES ====================
 services:
-  # ==================== DATABASE SERVICE ====================
-  postgres:
-    image: postgres:15.5-alpine
-    container_name: cems_postgres
+  
+  # ==================== CEMS API APPLICATION ====================
+  cems-api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: production
+      args:
+        - PYTHON_VERSION=3.11
+        - APP_ENV=production
+    container_name: cems-api
+    restart: unless-stopped
+    ports:
+      - "${API_PORT:-8000}:8000"
+    environment:
+      # Application Settings
+      - PROJECT_NAME=CEMS - Currency Exchange Management System
+      - VERSION=1.0.0
+      - ENVIRONMENT=production
+      - DEBUG=false
+      - API_V1_STR=/api/v1
+      
+      # Security Settings
+      - SECRET_KEY=${SECRET_KEY}
+      - ACCESS_TOKEN_EXPIRE_MINUTES=${ACCESS_TOKEN_EXPIRE_MINUTES:-30}
+      - REFRESH_TOKEN_EXPIRE_DAYS=${REFRESH_TOKEN_EXPIRE_DAYS:-7}
+      - PASSWORD_MIN_LENGTH=${PASSWORD_MIN_LENGTH:-8}
+      - ALGORITHM=HS256
+      
+      # Database Configuration
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@cems-postgres:5432/${POSTGRES_DB}
+      - POSTGRES_SERVER=cems-postgres
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_PORT=5432
+      
+      # Redis Configuration
+      - REDIS_URL=redis://cems-redis:6379/0
+      - REDIS_EXPIRE_SECONDS=${REDIS_EXPIRE_SECONDS:-3600}
+      
+      # CORS Settings
+      - BACKEND_CORS_ORIGINS=${BACKEND_CORS_ORIGINS:-http://localhost:3000,http://localhost:8080}
+      
+      # Email Configuration (if needed)
+      - SMTP_TLS=${SMTP_TLS:-true}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_HOST=${SMTP_HOST}
+      - SMTP_USER=${SMTP_USER}
+      - SMTP_PASSWORD=${SMTP_PASSWORD}
+      
+      # Monitoring
+      - SENTRY_DSN=${SENTRY_DSN}
+      
+    volumes:
+      - ./logs:/app/logs
+      - ./uploads:/app/uploads
+      - ./backups:/app/backups
+    depends_on:
+      cems-postgres:
+        condition: service_healthy
+      cems-redis:
+        condition: service_healthy
+    networks:
+      - cems-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.cems-api.rule=Host(`api.cems.local`)"
+      - "traefik.http.services.cems-api.loadbalancer.server.port=8000"
+
+  # ==================== POSTGRESQL DATABASE ====================
+  cems-postgres:
+    image: postgres:15-alpine
+    container_name: cems-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-cems_user}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cems_password}
-      POSTGRES_DB: ${POSTGRES_DB:-cems_db}
-      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_INITDB_ARGS=--encoding=UTF8 --locale=en_US.UTF-8
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
-      - backup_data:/backup
+      - ./backups/postgres:/backups
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
     networks:
       - cems-network
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cems_user} -d ${POSTGRES_DB:-cems_db}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 10s
       timeout: 5s
       retries: 5
-    deploy:
-      resources:
-        limits:
-          memory: 1G
-          cpus: '0.5'
-        reservations:
-          memory: 512M
-          cpus: '0.25'
+      start_period: 10s
+    command: >
+      postgres
+      -c shared_preload_libraries=pg_stat_statements
+      -c max_connections=200
+      -c shared_buffers=256MB
+      -c effective_cache_size=768MB
+      -c maintenance_work_mem=64MB
+      -c checkpoint_completion_target=0.9
+      -c wal_buffers=16MB
+      -c default_statistics_target=100
+      -c random_page_cost=1.1
+      -c effective_io_concurrency=200
+      -c work_mem=4MB
+      -c min_wal_size=1GB
+      -c max_wal_size=4GB
 
-  # ==================== REDIS CACHE SERVICE ====================
-  redis:
-    image: redis:7.2-alpine
-    container_name: cems_redis
+  # ==================== REDIS CACHE ====================
+  cems-redis:
+    image: redis:7-alpine
+    container_name: cems-redis
     restart: unless-stopped
-    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-cems_redis_pass}
+    command: >
+      redis-server
+      --requirepass ${REDIS_PASSWORD}
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --save 900 1
+      --save 300 10
+      --save 60 10000
+      --appendonly yes
+      --appendfsync everysec
     environment:
-      REDIS_PASSWORD: ${REDIS_PASSWORD:-cems_redis_pass}
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
     volumes:
       - redis_data:/data
+      - ./docker/redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
     ports:
       - "${REDIS_PORT:-6379}:6379"
     networks:
@@ -74,203 +150,228 @@ services:
     healthcheck:
       test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
       interval: 10s
-      timeout: 3s
+      timeout: 5s
       retries: 5
-    deploy:
-      resources:
-        limits:
-          memory: 256M
-          cpus: '0.25'
-
-  # ==================== MAIN APPLICATION ====================
-  app:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile
-      target: production
-    container_name: cems_app
-    restart: unless-stopped
-    environment:
-      # Database Configuration
-      DATABASE_URL: postgresql://${POSTGRES_USER:-cems_user}:${POSTGRES_PASSWORD:-cems_password}@postgres:5432/${POSTGRES_DB:-cems_db}
-      
-      # Redis Configuration
-      REDIS_URL: redis://:${REDIS_PASSWORD:-cems_redis_pass}@redis:6379/0
-      
-      # Application Configuration
-      APP_NAME: ${APP_NAME:-CEMS}
-      APP_VERSION: ${APP_VERSION:-1.0.0}
-      DEBUG: ${DEBUG:-false}
-      ENVIRONMENT: ${ENVIRONMENT:-production}
-      
-      # Security
-      SECRET_KEY: ${SECRET_KEY:-your-super-secret-key-change-in-production}
-      ALGORITHM: ${ALGORITHM:-HS256}
-      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-30}
-      
-      # CORS
-      BACKEND_CORS_ORIGINS: ${BACKEND_CORS_ORIGINS:-["https://yourdomain.com"]}
-      
-      # Admin User
-      FIRST_SUPERUSER: ${FIRST_SUPERUSER:-admin@cems.com}
-      FIRST_SUPERUSER_PASSWORD: ${FIRST_SUPERUSER_PASSWORD:-changeme123!}
-      
-      # Monitoring
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      SENTRY_DSN: ${SENTRY_DSN:-}
-      
-    volumes:
-      - app_logs:/app/logs
-      - ./uploads:/app/uploads
-    ports:
-      - "${APP_PORT:-8000}:8000"
-    networks:
-      - cems-network
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
-    deploy:
-      resources:
-        limits:
-          memory: 1G
-          cpus: '1.0'
-        reservations:
-          memory: 512M
-          cpus: '0.5'
+      start_period: 10s
 
   # ==================== NGINX REVERSE PROXY ====================
-  nginx:
-    image: nginx:1.25-alpine
-    container_name: cems_nginx
+  cems-nginx:
+    image: nginx:alpine
+    container_name: cems-nginx
     restart: unless-stopped
+    ports:
+      - "${NGINX_HTTP_PORT:-80}:80"
+      - "${NGINX_HTTPS_PORT:-443}:443"
     volumes:
       - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./docker/nginx/cems.conf:/etc/nginx/conf.d/default.conf:ro
-      - ./static:/app/static:ro
-      - app_logs:/var/log/nginx
-    ports:
-      - "${NGINX_PORT:-80}:80"
-      - "${NGINX_SSL_PORT:-443}:443"
+      - ./docker/nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./docker/nginx/ssl:/etc/nginx/ssl:ro
+      - ./logs/nginx:/var/log/nginx
+    depends_on:
+      - cems-api
     networks:
       - cems-network
-    depends_on:
-      - app
     healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/health"]
+      test: ["CMD", "curl", "-f", "http://localhost/health"]
       interval: 30s
       timeout: 10s
       retries: 3
-    deploy:
-      resources:
-        limits:
-          memory: 128M
-          cpus: '0.25'
 
-  # ==================== BACKGROUND WORKER ====================
-  worker:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile
-      target: production
-    container_name: cems_worker
+  # ==================== MONITORING - PROMETHEUS (Optional) ====================
+  cems-prometheus:
+    image: prom/prometheus:latest
+    container_name: cems-prometheus
     restart: unless-stopped
-    command: celery -A app.core.celery worker --loglevel=info
-    environment:
-      # Database Configuration
-      DATABASE_URL: postgresql://${POSTGRES_USER:-cems_user}:${POSTGRES_PASSWORD:-cems_password}@postgres:5432/${POSTGRES_DB:-cems_db}
-      
-      # Redis Configuration (as broker)
-      CELERY_BROKER_URL: redis://:${REDIS_PASSWORD:-cems_redis_pass}@redis:6379/1
-      CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD:-cems_redis_pass}@redis:6379/2
-      
-      # Application Configuration
-      ENVIRONMENT: ${ENVIRONMENT:-production}
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
     volumes:
-      - app_logs:/app/logs
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
     networks:
       - cems-network
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-          cpus: '0.5'
+    profiles:
+      - monitoring
 
-  # ==================== TASK SCHEDULER ====================
-  scheduler:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile
-      target: production
-    container_name: cems_scheduler
+  # ==================== MONITORING - GRAFANA (Optional) ====================
+  cems-grafana:
+    image: grafana/grafana:latest
+    container_name: cems-grafana
     restart: unless-stopped
-    command: celery -A app.core.celery beat --loglevel=info
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
     environment:
-      # Database Configuration
-      DATABASE_URL: postgresql://${POSTGRES_USER:-cems_user}:${POSTGRES_PASSWORD:-cems_password}@postgres:5432/${POSTGRES_DB:-cems_db}
-      
-      # Redis Configuration
-      CELERY_BROKER_URL: redis://:${REDIS_PASSWORD:-cems_redis_pass}@redis:6379/1
-      CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD:-cems_redis_pass}@redis:6379/2
-      
-      # Application Configuration
-      ENVIRONMENT: ${ENVIRONMENT:-production}
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
     volumes:
-      - app_logs:/app/logs
+      - grafana_data:/var/lib/grafana
+      - ./docker/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./docker/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+    depends_on:
+      - cems-prometheus
     networks:
       - cems-network
+    profiles:
+      - monitoring
+
+  # ==================== LOG MANAGEMENT - LOKI (Optional) ====================
+  cems-loki:
+    image: grafana/loki:latest
+    container_name: cems-loki
+    restart: unless-stopped
+    ports:
+      - "${LOKI_PORT:-3100}:3100"
+    volumes:
+      - ./docker/loki/loki.yml:/etc/loki/local-config.yaml:ro
+      - loki_data:/loki
+    command: -config.file=/etc/loki/local-config.yaml
+    networks:
+      - cems-network
+    profiles:
+      - logging
+
+  # ==================== DATABASE ADMIN - PGADMIN (Optional) ====================
+  cems-pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: cems-pgadmin
+    restart: unless-stopped
+    environment:
+      - PGADMIN_DEFAULT_EMAIL=${PGADMIN_EMAIL:-admin@cems.local}
+      - PGADMIN_DEFAULT_PASSWORD=${PGADMIN_PASSWORD:-admin}
+      - PGADMIN_CONFIG_SERVER_MODE=False
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+      - ./docker/pgadmin/servers.json:/pgadmin4/servers.json:ro
+    ports:
+      - "${PGADMIN_PORT:-5050}:80"
     depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    deploy:
-      resources:
-        limits:
-          memory: 256M
-          cpus: '0.25'
+      - cems-postgres
+    networks:
+      - cems-network
+    profiles:
+      - admin
 
-# ==================== MONITORING SERVICES (Optional) ====================
-# Uncomment below for production monitoring
+# ==================== VOLUMES ====================
+volumes:
+  postgres_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./data/postgres
+  
+  redis_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./data/redis
+  
+  prometheus_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./data/prometheus
+  
+  grafana_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./data/grafana
+  
+  loki_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./data/loki
+  
+  pgadmin_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./data/pgadmin
 
-  # # Prometheus Monitoring
-  # prometheus:
-  #   image: prom/prometheus:latest
-  #   container_name: cems_prometheus
-  #   restart: unless-stopped
-  #   volumes:
-  #     - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
-  #   ports:
-  #     - "9090:9090"
-  #   networks:
-  #     - cems-network
+# ==================== NETWORKS ====================
+networks:
+  cems-network:
+    driver: bridge
+    name: cems-network
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
 
-  # # Grafana Dashboard
-  # grafana:
-  #   image: grafana/grafana:latest
-  #   container_name: cems_grafana
-  #   restart: unless-stopped
-  #   environment:
-  #     GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
-  #   volumes:
-  #     - grafana_data:/var/lib/grafana
-  #   ports:
-  #     - "3000:3000"
-  #   networks:
-  #     - cems-network
+# ==================== CONFIGURATION NOTES ====================
+#
+# Usage Instructions:
+# 
+# 1. Basic Setup:
+#    docker-compose up -d cems-api cems-postgres cems-redis
+# 
+# 2. With Monitoring:
+#    docker-compose --profile monitoring up -d
+# 
+# 3. With Admin Tools:
+#    docker-compose --profile admin up -d
+# 
+# 4. Full Stack:
+#    docker-compose --profile monitoring --profile admin --profile logging up -d
+# 
+# 5. Development Mode:
+#    docker-compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+# 
+# Environment Variables Required:
+# - Copy .env.example to .env and configure:
+#   - SECRET_KEY (generate secure key)
+#   - POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB
+#   - REDIS_PASSWORD
+#   - SMTP_* variables for email
+#   - Optional: monitoring and admin credentials
+# 
+# Data Persistence:
+# - All data is stored in ./data/ directory
+# - Logs are stored in ./logs/ directory
+# - Backups should be stored in ./backups/ directory
+# 
+# Health Checks:
+# - API: http://localhost:8000/health
+# - Database: Automatic health check configured
+# - Redis: Automatic health check configured
+# 
+# Monitoring URLs:
+# - Grafana: http://localhost:3000
+# - Prometheus: http://localhost:9090
+# - PgAdmin: http://localhost:5050
+# 
+# Security Notes:
+# - Change default passwords in production
+# - Use HTTPS in production (configure SSL certificates)
+# - Restrict network access appropriately
+# - Regular security updates for all images
+# - Monitor logs for security events
+# 
+# Scaling:
+# - To scale API: docker-compose up -d --scale cems-api=3
+# - Load balancer (nginx) will distribute requests
+# - Database remains single instance (consider clustering for HA)
+# 
+# Backup Strategy:
+# - Database: Automated backups to ./backups/postgres/
+# - Redis: RDB snapshots and AOF logs
+# - Application logs: Rotated and archived
+# - Configuration: Version controlled in git
+# 
+# Resource Requirements:
+# - Minimum: 2 CPU cores, 4GB RAM, 20GB storage
+# - Recommended: 4 CPU cores, 8GB RAM, 100GB storage
+# - Production: Scale based on expected load

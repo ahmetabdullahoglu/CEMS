@@ -1,106 +1,126 @@
-# ===============================================
-# CEMS - Currency Exchange Management System
-# Python Dependencies for Production & Development
-# ===============================================
-
 # ==================== CORE FRAMEWORK ====================
-fastapi==0.104.1                    # Modern web framework for APIs
-uvicorn[standard]==0.24.0           # ASGI server with performance extras
-gunicorn==21.2.0                    # WSGI HTTP Server for production
-pydantic==2.5.0                     # Data validation using Python type hints
-pydantic[email]==2.5.0              # Email validation support
+fastapi>=0.104.1,<0.105.0          # Modern, fast web framework for building APIs
+uvicorn[standard]>=0.24.0,<0.25.0  # ASGI server implementation
+pydantic>=2.5.0,<3.0.0             # Data validation and settings management
+pydantic[email]>=2.5.0,<3.0.0      # Email validation support
 
 # ==================== DATABASE ====================
-sqlalchemy==2.0.23                  # SQL toolkit and ORM
-alembic==1.12.1                     # Database migration tool
-psycopg2-binary==2.9.9              # PostgreSQL adapter (binary dist)
-asyncpg==0.29.0                     # Async PostgreSQL driver
-greenlet==3.0.1                     # Async support for SQLAlchemy
+sqlalchemy>=2.0.23,<3.0.0          # SQL toolkit and ORM
+alembic>=1.13.0,<2.0.0             # Database migration tool
+psycopg2-binary>=2.9.9,<3.0.0      # PostgreSQL adapter
+asyncpg>=0.29.0,<0.30.0            # Async PostgreSQL driver (if needed)
 
 # ==================== AUTHENTICATION & SECURITY ====================
-python-jose[cryptography]==3.3.0    # JWT token handling
-passlib[bcrypt]==1.7.4              # Password hashing library
-bcrypt==4.1.2                       # Bcrypt hashing algorithm
-cryptography==41.0.8                # Cryptographic recipes and primitives
-python-multipart==0.0.6             # Form data parsing
+python-jose[cryptography]>=3.3.0,<4.0.0  # JWT tokens with cryptography
+passlib[bcrypt]>=1.7.4,<2.0.0            # Password hashing library
+python-multipart>=0.0.6,<0.1.0           # Form data parsing
+cryptography>=41.0.7,<42.0.0             # Cryptographic primitives
 
-# ==================== CACHING & PERFORMANCE ====================
-redis==5.0.1                        # Redis client for caching
-aioredis==2.0.1                     # Async Redis client
-celery==5.3.4                       # Distributed task queue
-
-# ==================== HTTP & API ====================
-httpx==0.25.2                       # Modern HTTP client
-requests==2.31.0                    # HTTP library for external APIs
-aiofiles==23.2.1                    # Async file operations
-python-dateutil==2.8.2              # Date utilities
-
-# ==================== UTILITIES ====================
-python-dotenv==1.0.0                # Load environment variables from .env
-pytz==2023.3                        # Timezone definitions
-phonenumbers==8.13.25               # Phone number parsing and validation
-email-validator==2.1.0              # Email validation
-pycountry==23.12.11                 # Country and currency codes
-
-# ==================== LOGGING & MONITORING ====================
-structlog==23.2.0                   # Structured logging
-colorama==0.4.6                     # Cross-platform colored terminal text
-rich==13.7.0                        # Rich text and beautiful formatting
-
-# ==================== DEVELOPMENT TOOLS ====================
-pytest==7.4.3                       # Testing framework
-pytest-asyncio==0.21.1              # Async testing support
-pytest-cov==4.1.0                   # Coverage plugin for pytest
-pytest-mock==3.12.0                 # Mock plugin for pytest
-factory-boy==3.3.0                  # Test fixtures replacement
-faker==20.1.0                       # Generate fake data for testing
-
-# ==================== CODE QUALITY ====================
-black==23.11.0                      # Code formatter
-isort==5.12.0                       # Import sorter
-flake8==6.1.0                       # Linting tool
-mypy==1.7.1                         # Static type checker
-pre-commit==3.6.0                   # Pre-commit hooks framework
-
-# ==================== DOCUMENTATION ====================
-mkdocs==1.5.3                       # Documentation generator
-mkdocs-material==9.4.8              # Material theme for mkdocs
-mkdocs-swagger-ui-tag==0.6.8        # Swagger UI integration
-
-# ==================== FINANCIAL & EXCHANGE RATES ====================
-forex-python==1.8                   # Foreign exchange rates
-yfinance==0.2.28                    # Yahoo Finance API
-alpha-vantage==2.3.1                # Alpha Vantage API client
+# ==================== HTTP & NETWORKING ====================
+httpx>=0.25.2,<0.26.0              # HTTP client for async requests
+aiofiles>=23.2.1,<24.0.0           # Async file handling
+python-dotenv>=1.0.0,<2.0.0        # Environment variables from .env files
+requests>=2.31.0,<3.0.0            # HTTP library for synchronous requests
 
 # ==================== DATA PROCESSING ====================
-pandas==2.1.4                       # Data analysis and manipulation
-numpy==1.26.2                       # Numerical computing
-openpyxl==3.1.2                     # Excel file handling
-xlsxwriter==3.1.9                   # Excel file writing
-reportlab==4.0.7                    # PDF generation
+python-dateutil>=2.8.2,<3.0.0     # Date utilities
+pytz>=2023.3                       # Timezone handling
+email-validator>=2.1.0,<3.0.0      # Email validation
+phonenumbers>=8.13.27,<9.0.0       # Phone number validation and formatting
 
-# ==================== CONTAINER & DEPLOYMENT ====================
-docker-compose==1.29.2              # Docker compose Python library
+# ==================== CACHING & PERFORMANCE ====================
+redis>=5.0.1,<6.0.0                # Redis client for caching
+hiredis>=2.2.3,<3.0.0              # Fast Redis protocol parser
 
-# ==================== SPECIFIC VERSIONS FOR STABILITY ====================
-# Pin critical dependencies to ensure reproducible builds
-click==8.1.7                        # Command line interface creation
-jinja2==3.1.2                       # Template engine
-markupsafe==2.1.3                   # HTML/XML safe string handling
-itsdangerous==2.1.2                 # Various helpers for trusted data
-starlette==0.27.0                   # ASGI framework (FastAPI dependency)
-anyio==4.1.0                        # Async concurrency library
+# ==================== FILE HANDLING ====================
+openpyxl>=3.1.2,<4.0.0             # Excel file handling
+xlsxwriter>=3.1.9,<4.0.0           # Excel file writing
+python-csv>=1.0                    # Enhanced CSV handling
+Pillow>=10.1.0,<11.0.0             # Image processing
 
-# ==================== OPTIONAL DEVELOPMENT EXTRAS ====================
-# Uncomment for additional development features:
-# jupyter==1.0.0                    # Jupyter notebook
-# ipython==8.17.2                   # Enhanced Python shell
-# notebook==7.0.6                   # Jupyter notebook server
-# matplotlib==3.8.2                 # Plotting library
-# seaborn==0.13.0                   # Statistical data visualization
+# ==================== UTILITIES ====================
+python-slugify>=8.0.1,<9.0.0       # String slugification
+click>=8.1.7,<9.0.0                # Command line interface creation
+rich>=13.7.0,<14.0.0               # Rich text and beautiful formatting
+structlog>=23.2.0,<24.0.0          # Structured logging
 
-# ==================== PRODUCTION EXTRAS ====================
-# For production deployment with monitoring:
-# prometheus-client==0.19.0         # Prometheus metrics
-# sentry-sdk[fastapi]==1.38.0       # Error tracking
-# newrelic==9.2.0                   # Application monitoring
+# ==================== MONITORING & LOGGING ====================
+prometheus-client>=0.19.0,<0.20.0  # Prometheus metrics
+loguru>=0.7.2,<0.8.0               # Enhanced logging
+
+# ==================== DEVELOPMENT DEPENDENCIES ====================
+# These should be in requirements-dev.txt but included here for completeness
+
+# Testing
+pytest>=7.4.3,<8.0.0               # Testing framework
+pytest-asyncio>=0.21.1,<0.22.0     # Async testing support
+pytest-cov>=4.1.0,<5.0.0           # Coverage reporting
+pytest-mock>=3.12.0,<4.0.0         # Mocking utilities
+httpx>=0.25.2,<0.26.0              # HTTP testing client
+factory-boy>=3.3.0,<4.0.0          # Test data generation
+
+# Code Quality
+black>=23.11.0,<24.0.0             # Code formatting
+isort>=5.12.0,<6.0.0               # Import sorting
+flake8>=6.1.0,<7.0.0               # Code linting
+mypy>=1.7.1,<2.0.0                 # Static type checking
+bandit>=1.7.5,<2.0.0               # Security linting
+
+# Documentation
+mkdocs>=1.5.3,<2.0.0               # Documentation generator
+mkdocs-material>=9.4.8,<10.0.0     # Material theme for MkDocs
+
+# Development Tools
+pre-commit>=3.6.0,<4.0.0           # Git hooks management
+ipython>=8.17.2,<9.0.0             # Enhanced interactive Python shell
+
+# ==================== OPTIONAL DEPENDENCIES ====================
+# These can be installed separately based on deployment needs
+
+# Monitoring (Optional)
+# sentry-sdk[fastapi]>=1.38.0,<2.0.0     # Error tracking
+# newrelic>=9.2.0,<10.0.0                # APM monitoring
+
+# Message Queue (Optional)
+# celery>=5.3.4,<6.0.0                   # Distributed task queue
+# kombu>=5.3.4,<6.0.0                    # Messaging library
+
+# Additional Database Support (Optional)
+# pymongo>=4.6.0,<5.0.0                  # MongoDB driver
+# motor>=3.3.2,<4.0.0                    # Async MongoDB driver
+
+# ==================== PLATFORM SPECIFIC ====================
+# Windows
+# pywin32>=306; sys_platform == "win32"
+
+# macOS
+# pyobjc-core>=10.0; sys_platform == "darwin"
+
+# ==================== VERSION CONSTRAINTS ====================
+# Python version requirement (specified in pyproject.toml or setup.py)
+# python_requires = ">=3.11,<4.0"
+
+# ==================== SECURITY UPDATES ====================
+# Ensure latest security patches
+urllib3>=2.1.0,<3.0.0              # HTTP library security updates
+certifi>=2023.11.17                # Certificate authority bundle
+
+# ==================== COMPATIBILITY NOTES ====================
+# 
+# This requirements.txt is designed for:
+# - Python 3.11+
+# - FastAPI latest stable version
+# - Production-ready dependencies
+# - Security-focused versions
+# 
+# For development, also install requirements-dev.txt
+# For production, consider pinning exact versions
+# 
+# To install:
+# pip install -r requirements.txt
+# 
+# To upgrade all packages:
+# pip install -r requirements.txt --upgrade
+# 
+# To generate exact versions:
+# pip freeze > requirements-exact.txt
