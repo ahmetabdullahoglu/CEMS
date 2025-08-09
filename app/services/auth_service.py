@@ -1,6 +1,6 @@
 """
 Module: auth_service
-Purpose: Authentication service providing complete authentication workflow for CEMS
+Purpose: Enhanced authentication service with complete model integration for CEMS
 Author: CEMS Development Team
 Date: 2024
 """
@@ -8,6 +8,7 @@ Date: 2024
 from typing import Dict, Any, Optional, Tuple, List
 from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import SQLAlchemyError
 import secrets
 import ipaddress
 
@@ -19,16 +20,18 @@ from app.core.security import (
 from app.core.config import settings
 from app.core.constants import UserStatus, UserRole
 from app.core.exceptions import (
-    AuthenticationError, AccountLockedException, AccountInactiveError,
-    RateLimitExceededException, ValidationError, NotFoundError,
-    PermissionError, SecurityError
+    AuthenticationException, AccountLockedException, AccountSuspendedException,
+    RateLimitExceededException, ValidationException, NotFoundError,
+    InsufficientPermissionsException, TokenExpiredException, RefreshTokenException,
+    PasswordStrengthException, InvalidCredentialsException, SessionExpiredException
 )
 from app.schemas.auth import (
     LoginRequest, LoginResponse, RefreshTokenRequest, RefreshTokenResponse,
     PasswordChangeRequest, PasswordResetRequest, LogoutRequest,
-    TwoFactorVerifyRequest, TwoFactorSetupResponse, SecurityEvent
+    Login2FARequiredResponse, TokenValidationResponse, SecurityEvent
 )
 from app.schemas.user import UserResponse
+from app.db.models import User, Role, UserRole as UserRoleAssoc
 from app.utils.logger import get_logger
 from app.utils.validators import validate_password_strength, validate_ip_address
 
@@ -37,7 +40,7 @@ logger = get_logger(__name__)
 
 class AuthenticationService:
     """
-    Authentication service providing comprehensive authentication and authorization.
+    Enhanced authentication service providing comprehensive authentication and authorization.
     Handles login, logout, token management, security policies, and account protection.
     """
     
@@ -63,846 +66,629 @@ class AuthenticationService:
     def authenticate_user(
         self,
         login_data: LoginRequest,
-        ip_address: str,
-        user_agent: str = None
+        client_info: Dict[str, Any]
     ) -> LoginResponse:
         """
-        Authenticate user with comprehensive security checks.
+        Authenticate user with comprehensive security checks using database models.
         
         Args:
-            login_data: Login credentials and options
-            ip_address: Client IP address
-            user_agent: Client user agent
+            login_data: Login request data
+            client_info: Client information (IP, user agent, etc.)
             
         Returns:
-            LoginResponse: Authentication response with tokens
+            LoginResponse: Complete login response with tokens and user info
             
         Raises:
-            AuthenticationError: If authentication fails
+            InvalidCredentialsException: If credentials are invalid
             AccountLockedException: If account is locked
             RateLimitExceededException: If rate limit exceeded
         """
+        ip_address = client_info.get("ip_address", "unknown")
+        user_agent = client_info.get("user_agent", "unknown")
+        
         try:
-            # Validate IP address
-            if not validate_ip_address(ip_address):
-                raise SecurityError("Invalid IP address")
+            # Rate limiting check
+            self._check_login_rate_limit(ip_address)
             
-            # Check rate limiting
-            rate_limit_key = f"login:{ip_address}"
-            self._check_rate_limit(rate_limit_key, max_requests=10, window_minutes=15)
+            # Get user by username or email
+            user = self._get_user_by_login_identifier(login_data.username)
             
-            # Get user
-            user = self.user_repo.get_by_username_or_email(login_data.username)
-            if not user:
-                self._record_failed_login(None, ip_address, "User not found")
-                raise AuthenticationError("Invalid credentials")
-            
-            # Check account status
-            self._validate_account_status(user)
-            
-            # Check account lock
-            if self._is_account_locked(user):
-                self._record_security_event(
-                    user.id, ip_address, user_agent,
-                    "login_attempt_locked_account",
-                    {"username": login_data.username}
-                )
-                raise AccountLockedException(
-                    f"Account is locked until {user.locked_until}",
-                    locked_until=user.locked_until
-                )
+            # Validate user account status
+            self._validate_user_for_login(user)
             
             # Verify password
-            if not verify_password(login_data.password, user.hashed_password):
-                self._handle_failed_login(user, ip_address, user_agent)
-                raise AuthenticationError("Invalid credentials")
-            
-            # Check if password change is required
-            if user.force_password_change:
-                return LoginResponse(
-                    user=UserResponse.from_orm(user),
-                    access_token="",
-                    refresh_token="",
-                    token_type="bearer",
-                    expires_in=0,
-                    requires_password_change=True,
-                    message="Password change required before login"
+            if not verify_password(login_data.password.get_secret_value(), user.hashed_password):
+                self._handle_failed_login(user, ip_address)
+                raise InvalidCredentialsException(
+                    details={
+                        "reason": "invalid_password",
+                        "user_id": user.id if user else None
+                    }
                 )
             
-            # Generate tokens
-            access_token_data = {
-                "sub": str(user.id),
-                "username": user.username,
-                "email": user.email,
-                "roles": self.user_repo.get_user_roles(user.id),
-                "session_id": secrets.token_urlsafe(32),
-                "ip": ip_address
-            }
+            # Check if 2FA is required
+            if user.two_factor_enabled:
+                return self._handle_2fa_required(user, login_data, client_info)
             
-            access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
-            access_token = create_access_token(
-                data=access_token_data,
-                expires_delta=access_token_expires
-            )
+            # Successful login
+            return self._complete_successful_login(user, client_info)
             
-            refresh_token_expires = timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
-            refresh_token = create_refresh_token(
-                data={"sub": str(user.id), "session_id": access_token_data["session_id"]},
-                expires_delta=refresh_token_expires
-            )
-            
-            # Create session
-            session_id = security_manager.session_manager.create_session(
-                user_id=user.id,
-                ip_address=ip_address,
-                user_agent=user_agent
-            )
-            
-            # Record successful login
-            self.user_repo.record_successful_login(user.id, ip_address)
-            
-            # Record security event
-            self._record_security_event(
-                user.id, ip_address, user_agent,
-                "successful_login",
-                {
-                    "username": user.username,
-                    "remember_me": login_data.remember_me,
-                    "session_id": session_id
-                }
-            )
-            
-            self.logger.info(f"Successful login for user {user.id} from {ip_address}")
-            
-            # Handle "Remember Me" option
-            if login_data.remember_me:
-                access_token_expires = timedelta(days=7)  # Extended expiry
-            
-            return LoginResponse(
-                user=UserResponse.from_orm(user),
-                access_token=access_token,
-                refresh_token=refresh_token,
-                token_type="bearer",
-                expires_in=int(access_token_expires.total_seconds()),
-                session_id=session_id,
-                requires_two_factor=user.two_factor_enabled and not login_data.two_factor_code,
-                message="Login successful"
-            )
-            
-        except (AuthenticationError, AccountLockedException, RateLimitExceededException):
+        except AuthenticationException:
             raise
         except Exception as e:
             self.logger.error(f"Unexpected error during authentication: {str(e)}")
-            raise AuthenticationError("Authentication failed")
-    
-    def verify_two_factor(
-        self,
-        two_factor_data: TwoFactorVerifyRequest,
-        user_id: int,
-        ip_address: str
-    ) -> LoginResponse:
-        """
-        Verify two-factor authentication code.
-        
-        Args:
-            two_factor_data: 2FA verification data
-            user_id: User ID
-            ip_address: Client IP address
-            
-        Returns:
-            LoginResponse: Complete authentication response
-            
-        Raises:
-            AuthenticationError: If 2FA verification fails
-        """
-        try:
-            # Get user
-            user = self.user_repo.get_by_id_or_raise(user_id)
-            
-            # Verify 2FA code
-            if not self._verify_2fa_code(user, two_factor_data.code):
-                self._record_security_event(
-                    user.id, ip_address, None,
-                    "failed_2fa_verification",
-                    {"code_length": len(two_factor_data.code)}
-                )
-                raise AuthenticationError("Invalid 2FA code")
-            
-            # Generate final tokens (similar to regular login)
-            access_token_data = {
-                "sub": str(user.id),
-                "username": user.username,
-                "email": user.email,
-                "roles": self.user_repo.get_user_roles(user.id),
-                "session_id": secrets.token_urlsafe(32),
-                "ip": ip_address,
-                "2fa_verified": True
-            }
-            
-            access_token = create_access_token(data=access_token_data)
-            refresh_token = create_refresh_token(data={"sub": str(user.id)})
-            
-            self._record_security_event(
-                user.id, ip_address, None,
-                "successful_2fa_verification",
-                {"verification_method": "totp"}
+            raise AuthenticationException(
+                message="Authentication failed due to system error",
+                details={"error": str(e)}
             )
-            
-            return LoginResponse(
-                user=UserResponse.from_orm(user),
-                access_token=access_token,
-                refresh_token=refresh_token,
-                token_type="bearer",
-                expires_in=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
-                requires_two_factor=False,
-                message="2FA verification successful"
-            )
-            
-        except Exception as e:
-            self.logger.error(f"Error during 2FA verification: {str(e)}")
-            raise AuthenticationError("2FA verification failed")
     
     def refresh_access_token(
         self,
         refresh_data: RefreshTokenRequest,
-        ip_address: str
+        client_info: Dict[str, Any]
     ) -> RefreshTokenResponse:
         """
-        Refresh access token using refresh token.
+        Refresh access token using refresh token with model validation.
         
         Args:
             refresh_data: Refresh token request
-            ip_address: Client IP address
+            client_info: Client information
             
         Returns:
-            RefreshTokenResponse: New access token
+            RefreshTokenResponse: New access token and optionally new refresh token
             
         Raises:
-            AuthenticationError: If refresh fails
+            RefreshTokenException: If refresh token is invalid
+            AccountSuspendedException: If account is suspended
         """
         try:
             # Verify refresh token
-            payload = verify_token(refresh_data.refresh_token, token_type="refresh")
-            user_id = int(payload["sub"])
+            payload = security_manager.verify_token(refresh_data.refresh_token, "refresh")
+            user_id = payload.get("sub")
             
-            # Get user
-            user = self.user_repo.get_by_id(user_id)
-            if not user or not user.is_active:
-                raise AuthenticationError("Invalid refresh token")
+            if not user_id:
+                raise RefreshTokenException("Invalid token payload")
             
-            # Check session if available
-            session_id = payload.get("session_id")
-            if session_id:
-                session = security_manager.session_manager.get_session(session_id)
-                if not session or not session["is_active"]:
-                    raise AuthenticationError("Session has expired")
-                
-                # Update session activity
-                security_manager.session_manager.update_session_activity(session_id)
+            # Get user and validate status
+            user = self.user_repo.get_by_id_or_raise(int(user_id))
+            self._validate_user_account_status(user)
             
-            # Generate new access token
+            # Create new access token
             access_token_data = {
                 "sub": str(user.id),
                 "username": user.username,
                 "email": user.email,
                 "roles": self.user_repo.get_user_roles(user.id),
-                "session_id": session_id,
-                "ip": ip_address
+                "permissions": self.user_repo.get_user_permissions(user.id)
             }
             
-            new_access_token = create_access_token(data=access_token_data)
+            access_token = create_access_token(access_token_data)
             
-            self._record_security_event(
-                user.id, ip_address, None,
-                "token_refresh",
-                {"session_id": session_id}
+            # Optionally create new refresh token (rotation)
+            new_refresh_token = None
+            if getattr(settings, 'ROTATE_REFRESH_TOKENS', True):
+                new_refresh_token = create_refresh_token({"sub": str(user.id)})
+                # Blacklist old refresh token
+                security_manager.token_blacklist.add_token(
+                    refresh_data.refresh_token,
+                    datetime.utcnow() + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
+                )
+            
+            # Log token refresh
+            self._log_security_event(
+                user_id=user.id,
+                event_type="token_refresh",
+                details=client_info
             )
             
             return RefreshTokenResponse(
-                access_token=new_access_token,
+                access_token=access_token,
                 token_type="bearer",
-                expires_in=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60
+                expires_in=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+                refresh_token=new_refresh_token or refresh_data.refresh_token
             )
             
+        except TokenExpiredException:
+            raise RefreshTokenException("Refresh token has expired")
         except Exception as e:
-            self.logger.error(f"Error refreshing token: {str(e)}")
-            raise AuthenticationError("Token refresh failed")
+            self.logger.error(f"Token refresh error: {str(e)}")
+            raise RefreshTokenException(f"Token refresh failed: {str(e)}")
     
     def logout_user(
         self,
+        user: User,
         logout_data: LogoutRequest,
-        user_id: int,
-        ip_address: str
+        client_info: Dict[str, Any]
     ) -> Dict[str, Any]:
         """
-        Logout user and invalidate session/tokens.
+        Logout user and handle token/session cleanup.
         
         Args:
+            user: Authenticated user model
             logout_data: Logout request data
-            user_id: User ID
-            ip_address: Client IP address
+            client_info: Client information
             
         Returns:
-            Dict[str, Any]: Logout response
+            Dictionary with logout status and statistics
         """
+        sessions_terminated = 0
+        
         try:
-            # Get user
-            user = self.user_repo.get_by_id(user_id)
-            if not user:
-                return {"message": "Logout successful"}
-            
-            # Invalidate tokens
-            if logout_data.access_token:
-                security_manager.token_blacklist.blacklist_token(logout_data.access_token)
-            
-            if logout_data.refresh_token:
-                security_manager.token_blacklist.blacklist_token(logout_data.refresh_token)
-            
-            # Invalidate sessions
-            if logout_data.all_sessions:
-                # Logout from all sessions
-                invalidated_count = security_manager.session_manager.invalidate_user_sessions(user_id)
-                message = f"Logged out from all {invalidated_count} sessions"
+            # Terminate sessions based on request
+            if logout_data.terminate_all_sessions:
+                sessions_terminated = security_manager.session_manager.invalidate_all_user_sessions(
+                    user.id
+                )
             else:
-                # Logout from current session only
-                if logout_data.session_id:
-                    security_manager.session_manager.invalidate_session(logout_data.session_id)
-                message = "Logged out successfully"
+                # Terminate current session only
+                session_id = client_info.get("session_id")
+                if session_id:
+                    security_manager.session_manager.invalidate_session(session_id)
+                    sessions_terminated = 1
             
-            # Record security event
-            self._record_security_event(
-                user.id, ip_address, None,
-                "user_logout",
-                {
-                    "all_sessions": logout_data.all_sessions,
-                    "session_id": logout_data.session_id
+            # Revoke refresh token if requested
+            if logout_data.revoke_refresh_token:
+                refresh_token = client_info.get("refresh_token")
+                if refresh_token:
+                    security_manager.token_blacklist.add_token(
+                        refresh_token,
+                        datetime.utcnow() + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
+                    )
+            
+            # Log logout event
+            self._log_security_event(
+                user_id=user.id,
+                event_type="logout",
+                details={
+                    **client_info,
+                    "sessions_terminated": sessions_terminated,
+                    "refresh_token_revoked": logout_data.revoke_refresh_token
                 }
             )
             
-            self.logger.info(f"User {user_id} logged out from {ip_address}")
-            
             return {
-                "message": message,
-                "logged_out_at": datetime.utcnow().isoformat()
+                "message": "Logged out successfully",
+                "sessions_terminated": sessions_terminated
             }
             
         except Exception as e:
-            self.logger.error(f"Error during logout: {str(e)}")
-            return {"message": "Logout completed"}
-    
-    # ==================== PASSWORD MANAGEMENT ====================
+            self.logger.error(f"Logout error for user {user.id}: {str(e)}")
+            raise AuthenticationException(
+                message="Logout failed",
+                details={"error": str(e)}
+            )
     
     def change_password(
         self,
-        password_data: PasswordChangeRequest,
-        user_id: int,
-        ip_address: str
+        user: User,
+        password_data: PasswordChangeRequest
     ) -> Dict[str, Any]:
         """
-        Change user password with validation.
+        Change user password with validation and security checks.
         
         Args:
+            user: User model instance
             password_data: Password change request
-            user_id: User ID
-            ip_address: Client IP address
             
         Returns:
-            Dict[str, Any]: Password change response
+            Dictionary with change status
             
         Raises:
-            AuthenticationError: If current password is wrong
-            ValidationError: If new password doesn't meet requirements
+            InvalidCredentialsException: If current password is wrong
+            PasswordStrengthException: If new password is weak
         """
         try:
-            # Get user
-            user = self.user_repo.get_by_id_or_raise(user_id)
-            
             # Verify current password
-            if not verify_password(password_data.current_password, user.hashed_password):
-                self._record_security_event(
-                    user.id, ip_address, None,
-                    "failed_password_change",
-                    {"reason": "incorrect_current_password"}
+            if not verify_password(
+                password_data.current_password.get_secret_value(),
+                user.hashed_password
+            ):
+                raise InvalidCredentialsException(
+                    details={"reason": "invalid_current_password"}
                 )
-                raise AuthenticationError("Current password is incorrect")
             
-            # Validate new password
-            password_validation = validate_password_strength(password_data.new_password)
-            if not password_validation["is_valid"]:
-                raise ValidationError(f"Password requirements not met: {password_validation['message']}")
+            # Validate new password strength
+            new_password = password_data.new_password.get_secret_value()
+            strength_check = security_manager.check_password_strength(new_password)
             
-            # Check password history (if enabled)
-            if hasattr(user, 'password_history') and user.password_history:
-                for old_password_hash in user.password_history[-5:]:  # Check last 5 passwords
-                    if verify_password(password_data.new_password, old_password_hash):
-                        raise ValidationError("Cannot reuse recent passwords")
+            if not strength_check["is_valid"]:
+                raise PasswordStrengthException(
+                    requirements=strength_check,
+                    details={"suggestions": strength_check.get("suggestions", [])}
+                )
             
             # Update password
-            new_password_hash = get_password_hash(password_data.new_password)
-            success = self.user_repo.update_password(user_id, new_password_hash)
+            user.hashed_password = get_password_hash(new_password)
+            user.password_changed_at = datetime.utcnow()
+            user.force_password_change = False
             
-            if not success:
-                raise ValidationError("Failed to update password")
+            # Update password history if enabled
+            if getattr(settings, 'PASSWORD_HISTORY_COUNT', 0) > 0:
+                self._update_password_history(user, user.hashed_password)
             
-            # Invalidate all sessions except current (if specified)
-            current_session = getattr(password_data, 'current_session_id', None)
-            security_manager.session_manager.invalidate_user_sessions(
-                user_id, 
-                except_session=current_session
+            self.db.commit()
+            
+            # Log password change
+            self._log_security_event(
+                user_id=user.id,
+                event_type="password_change",
+                details={"strength_score": strength_check.get("score", 0)}
             )
-            
-            # Record security event
-            self._record_security_event(
-                user.id, ip_address, None,
-                "password_changed",
-                {"force_change": user.force_password_change}
-            )
-            
-            self.logger.info(f"Password changed for user {user_id}")
             
             return {
                 "message": "Password changed successfully",
-                "password_strength": password_validation["strength"],
-                "sessions_invalidated": True,
-                "changed_at": datetime.utcnow().isoformat()
+                "strength_score": strength_check.get("score", 0)
             }
             
-        except (AuthenticationError, ValidationError):
+        except (InvalidCredentialsException, PasswordStrengthException):
             raise
         except Exception as e:
-            self.logger.error(f"Error changing password: {str(e)}")
-            raise ValidationError("Password change failed")
+            self.db.rollback()
+            self.logger.error(f"Password change error for user {user.id}: {str(e)}")
+            raise AuthenticationException(
+                message="Password change failed",
+                details={"error": str(e)}
+            )
     
-    def initiate_password_reset(
+    def validate_token(
         self,
-        reset_data: PasswordResetRequest,
-        ip_address: str
-    ) -> Dict[str, Any]:
+        token: str,
+        token_type: str = "access"
+    ) -> TokenValidationResponse:
         """
-        Initiate password reset process.
+        Validate token and return user information.
         
         Args:
-            reset_data: Password reset request
-            ip_address: Client IP address
+            token: JWT token to validate
+            token_type: Type of token (access/refresh)
             
         Returns:
-            Dict[str, Any]: Reset initiation response
+            TokenValidationResponse: Validation result with user info
         """
         try:
-            # Check rate limiting for password reset
-            rate_limit_key = f"password_reset:{ip_address}"
-            self._check_rate_limit(rate_limit_key, max_requests=3, window_minutes=60)
+            payload = security_manager.verify_token(token, token_type)
+            user_id = payload.get("sub")
             
-            # Get user
-            user = self.user_repo.get_by_email(reset_data.email)
+            if user_id:
+                user = self.user_repo.get_by_id(int(user_id))
+                if user and self._is_user_account_valid(user):
+                    return TokenValidationResponse(
+                        valid=True,
+                        user_id=user.id,
+                        username=user.username,
+                        expires_at=datetime.fromtimestamp(payload.get("exp", 0)),
+                        roles=self.user_repo.get_user_roles(user.id)
+                    )
             
-            # Always return success to prevent email enumeration
-            response = {
-                "message": "If the email exists, a reset link has been sent",
-                "reset_initiated_at": datetime.utcnow().isoformat()
-            }
+            return TokenValidationResponse(valid=False)
             
-            if not user or not user.is_active:
-                # Log potential attack
-                self._record_security_event(
-                    None, ip_address, None,
-                    "password_reset_invalid_email",
-                    {"email": reset_data.email}
-                )
-                return response
-            
-            # Generate reset token
-            reset_token = secrets.token_urlsafe(32)
-            reset_expires = datetime.utcnow() + timedelta(hours=1)  # 1 hour expiry
-            
-            # Store reset token (in production, store in database)
-            # For now, we'll store in security manager's memory
-            reset_data_dict = {
-                "user_id": user.id,
-                "token": reset_token,
-                "expires_at": reset_expires,
-                "ip_address": ip_address,
-                "used": False
-            }
-            
-            # In a real implementation, you'd store this in the database
-            # security_manager.store_password_reset(reset_token, reset_data_dict)
-            
-            # Record security event
-            self._record_security_event(
-                user.id, ip_address, None,
-                "password_reset_initiated",
-                {"email": user.email}
-            )
-            
-            # TODO: Send email with reset link
-            # email_service.send_password_reset_email(user.email, reset_token)
-            
-            self.logger.info(f"Password reset initiated for user {user.id}")
-            
-            return response
-            
-        except RateLimitExceededException:
-            raise
         except Exception as e:
-            self.logger.error(f"Error initiating password reset: {str(e)}")
-            return {
-                "message": "If the email exists, a reset link has been sent",
-                "reset_initiated_at": datetime.utcnow().isoformat()
-            }
+            self.logger.debug(f"Token validation failed: {str(e)}")
+            return TokenValidationResponse(valid=False)
     
-    # ==================== TWO-FACTOR AUTHENTICATION ====================
+    # ==================== PRIVATE HELPER METHODS ====================
     
-    def setup_two_factor(self, user_id: int) -> TwoFactorSetupResponse:
+    def _get_user_by_login_identifier(self, identifier: str) -> User:
         """
-        Setup two-factor authentication for user.
+        Get user by username or email using repository.
         
         Args:
-            user_id: User ID
+            identifier: Username or email
             
         Returns:
-            TwoFactorSetupResponse: 2FA setup data
+            User model instance
+            
+        Raises:
+            InvalidCredentialsException: If user not found
         """
-        try:
-            # Get user
-            user = self.user_repo.get_by_id_or_raise(user_id)
-            
-            if user.two_factor_enabled:
-                raise ValidationError("Two-factor authentication is already enabled")
-            
-            # Generate 2FA secret
-            secret = security_manager.generate_2fa_secret()
-            qr_code_url = security_manager.generate_2fa_qr_code(
-                secret, 
-                user.email, 
-                settings.PROJECT_NAME
+        user = None
+        
+        # Try by username first
+        if "@" not in identifier:
+            user = self.user_repo.get_by_username(identifier)
+        else:
+            # Try by email
+            user = self.user_repo.get_by_email(identifier)
+        
+        if not user:
+            # Log potential security issue
+            self.logger.warning(f"Login attempt with unknown identifier: {identifier}")
+            raise InvalidCredentialsException(
+                details={"reason": "user_not_found"}
             )
-            
-            # Generate backup codes
-            backup_codes = security_manager.generate_backup_codes()
-            
-            # Store secret temporarily (user must verify before enabling)
-            # In production, store this securely in database
-            temp_2fa_data = {
-                "user_id": user_id,
-                "secret": secret,
-                "backup_codes": backup_codes,
-                "verified": False,
-                "created_at": datetime.utcnow()
-            }
-            
-            return TwoFactorSetupResponse(
-                secret=secret,
-                qr_code_url=qr_code_url,
-                backup_codes=backup_codes,
-                manual_entry_key=secret,
-                instructions="Scan the QR code with your authenticator app"
-            )
-            
-        except Exception as e:
-            self.logger.error(f"Error setting up 2FA for user {user_id}: {str(e)}")
-            raise ValidationError("Failed to setup two-factor authentication")
+        
+        return user
     
-    def verify_and_enable_two_factor(
-        self,
-        user_id: int,
-        verification_code: str,
-        ip_address: str
-    ) -> Dict[str, Any]:
+    def _validate_user_for_login(self, user: User) -> None:
         """
-        Verify 2FA setup and enable two-factor authentication.
+        Validate user account status for login using model properties.
         
         Args:
-            user_id: User ID
-            verification_code: 6-digit verification code
-            ip_address: Client IP address
+            user: User model instance
             
-        Returns:
-            Dict[str, Any]: Verification response
+        Raises:
+            Various authentication exceptions based on status
         """
-        try:
-            # Get user
-            user = self.user_repo.get_by_id_or_raise(user_id)
-            
-            # Get temporary 2FA data
-            # In production, retrieve from database
-            # temp_2fa_data = get_temp_2fa_data(user_id)
-            
-            # For demo, assume secret is available
-            if not hasattr(user, 'temp_2fa_secret'):
-                raise ValidationError("No pending 2FA setup found")
-            
-            # Verify code
-            if not self._verify_2fa_code_with_secret(user.temp_2fa_secret, verification_code):
-                raise AuthenticationError("Invalid verification code")
-            
-            # Enable 2FA
-            self.user_repo.update_user(user_id, {
-                "two_factor_enabled": True,
-                "two_factor_secret": user.temp_2fa_secret,
-                "two_factor_backup_codes": user.temp_backup_codes
-            })
-            
-            # Record security event
-            self._record_security_event(
-                user.id, ip_address, None,
-                "2fa_enabled",
-                {"verification_method": "totp"}
+        # Check if account is locked using model property
+        if user.is_locked:
+            raise AccountLockedException(
+                unlock_time=user.locked_until.isoformat() if user.locked_until else None,
+                details={
+                    "user_id": user.id,
+                    "locked_until": user.locked_until
+                }
             )
-            
-            self.logger.info(f"Two-factor authentication enabled for user {user_id}")
-            
-            return {
-                "message": "Two-factor authentication enabled successfully",
-                "enabled_at": datetime.utcnow().isoformat(),
-                "backup_codes_generated": True
-            }
-            
-        except Exception as e:
-            self.logger.error(f"Error enabling 2FA for user {user_id}: {str(e)}")
-            raise ValidationError("Failed to enable two-factor authentication")
-    
-    def disable_two_factor(
-        self,
-        user_id: int,
-        password: str,
-        ip_address: str
-    ) -> Dict[str, Any]:
-        """
-        Disable two-factor authentication.
         
-        Args:
-            user_id: User ID
-            password: User's password for verification
-            ip_address: Client IP address
-            
-        Returns:
-            Dict[str, Any]: Disable response
-        """
-        try:
-            # Get user
-            user = self.user_repo.get_by_id_or_raise(user_id)
-            
-            # Verify password
-            if not verify_password(password, user.hashed_password):
-                raise AuthenticationError("Password verification failed")
-            
-            # Disable 2FA
-            self.user_repo.update_user(user_id, {
-                "two_factor_enabled": False,
-                "two_factor_secret": None,
-                "two_factor_backup_codes": None
-            })
-            
-            # Record security event
-            self._record_security_event(
-                user.id, ip_address, None,
-                "2fa_disabled",
-                {"verification_method": "password"}
+        # Check account status using enum comparison
+        if user.status == UserStatus.SUSPENDED:
+            raise AccountSuspendedException(
+                details={"user_id": user.id, "status": user.status}
             )
-            
-            self.logger.warning(f"Two-factor authentication disabled for user {user_id}")
-            
-            return {
-                "message": "Two-factor authentication disabled",
-                "disabled_at": datetime.utcnow().isoformat()
-            }
-            
-        except Exception as e:
-            self.logger.error(f"Error disabling 2FA for user {user_id}: {str(e)}")
-            raise ValidationError("Failed to disable two-factor authentication")
-    
-    # ==================== SECURITY VALIDATION METHODS ====================
-    
-    def _validate_account_status(self, user) -> None:
-        """Validate user account status."""
+        
+        if user.status not in [UserStatus.ACTIVE, UserStatus.PENDING]:
+            raise AuthenticationException(
+                message=f"Account status does not allow login: {user.status}",
+                details={
+                    "user_id": user.id,
+                    "status": user.status
+                }
+            )
+        
         if not user.is_active:
-            raise AccountInactiveError("Account is deactivated")
-        
-        if user.status == UserStatus.SUSPENDED.value:
-            raise AccountInactiveError("Account is suspended")
-        
-        if user.status == UserStatus.PENDING.value:
-            raise AccountInactiveError("Account is pending verification")
-        
-        if user.status != UserStatus.ACTIVE.value:
-            raise AccountInactiveError(f"Account status: {user.status}")
+            raise AuthenticationException(
+                message="Account is deactivated",
+                details={"user_id": user.id}
+            )
     
-    def _is_account_locked(self, user) -> bool:
-        """Check if account is locked."""
-        if user.locked_until and user.locked_until > datetime.utcnow():
-            return True
+    def _complete_successful_login(
+        self,
+        user: User,
+        client_info: Dict[str, Any]
+    ) -> LoginResponse:
+        """
+        Complete successful login process with model updates.
         
-        # Check failed login attempts
-        if (user.failed_login_attempts or 0) >= self.max_login_attempts:
-            # Auto-lock account
-            self.user_repo.lock_user(user.id, self.lockout_duration)
-            return True
+        Args:
+            user: User model instance
+            client_info: Client information
+            
+        Returns:
+            LoginResponse: Complete login response
+        """
+        ip_address = client_info.get("ip_address", "unknown")
         
-        return False
-    
-    def _handle_failed_login(self, user, ip_address: str, user_agent: str = None) -> None:
-        """Handle failed login attempt."""
-        # Increment failed login attempts
-        failed_count = self.user_repo.increment_failed_login(user.id)
+        # Record successful login in model
+        user.record_login(ip_address)
         
-        # Check if account should be locked
-        if failed_count >= self.max_login_attempts:
-            self.user_repo.lock_user(user.id, self.lockout_duration)
-            self.logger.warning(f"Account {user.id} locked after {failed_count} failed attempts")
+        # Create session
+        session_id = security_manager.session_manager.create_session(
+            user_id=user.id,
+            ip_address=ip_address,
+            user_agent=client_info.get("user_agent", "unknown")
+        )
         
-        # Record security event
-        self._record_security_event(
-            user.id, ip_address, user_agent,
-            "failed_login_attempt",
-            {
-                "failed_count": failed_count,
-                "max_attempts": self.max_login_attempts,
-                "locked": failed_count >= self.max_login_attempts
+        # Get user roles and permissions using repository
+        user_roles = self.user_repo.get_user_roles(user.id)
+        user_permissions = self.user_repo.get_user_permissions(user.id)
+        
+        # Create tokens
+        token_data = {
+            "sub": str(user.id),
+            "username": user.username,
+            "email": user.email,
+            "roles": user_roles,
+            "permissions": user_permissions,
+            "session_id": session_id
+        }
+        
+        access_token = create_access_token(token_data)
+        refresh_token = create_refresh_token({"sub": str(user.id)})
+        
+        # Commit changes
+        self.db.commit()
+        
+        # Log successful login
+        self._log_security_event(
+            user_id=user.id,
+            event_type="login",
+            details={
+                **client_info,
+                "session_id": session_id,
+                "roles": user_roles
             }
         )
-    
-    def _record_failed_login(self, user_id: Optional[int], ip_address: str, reason: str) -> None:
-        """Record failed login attempt."""
-        self._record_security_event(
-            user_id, ip_address, None,
-            "failed_login_invalid_user",
-            {"reason": reason}
+        
+        return LoginResponse(
+            access_token=access_token,
+            refresh_token=refresh_token,
+            token_type="bearer",
+            expires_in=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+            refresh_expires_in=settings.REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60,
+            
+            # User information from model
+            user_id=user.id,
+            username=user.username,
+            email=user.email,
+            full_name=user.full_name,
+            roles=user_roles,
+            permissions=user_permissions,
+            
+            # Session information
+            session_id=session_id,
+            last_login=user.last_login_at,
+            
+            # Security flags
+            is_2fa_enabled=getattr(user, 'two_factor_enabled', False),
+            must_change_password=user.force_password_change,
+            password_expires_in_days=self._calculate_password_expiry_days(user)
         )
     
-    def _check_rate_limit(
-        self, 
-        identifier: str, 
-        max_requests: int = 10, 
-        window_minutes: int = 15
-    ) -> None:
-        """Check rate limit for identifier."""
-        try:
-            security_manager.check_rate_limit(identifier, max_requests, window_minutes)
-        except Exception as e:
-            self.logger.warning(f"Rate limit exceeded for {identifier}: {str(e)}")
-            raise RateLimitExceededException(f"Too many requests. Try again later.")
-    
-    def _verify_2fa_code(self, user, code: str) -> bool:
-        """Verify 2FA code for user."""
-        if not user.two_factor_enabled or not user.two_factor_secret:
-            return False
+    def _handle_failed_login(self, user: User, ip_address: str) -> None:
+        """
+        Handle failed login attempt with model updates.
         
-        return security_manager.verify_2fa_token(user.two_factor_secret, code)
+        Args:
+            user: User model instance
+            ip_address: Client IP address
+        """
+        if user:
+            # Record failed attempt using model method
+            user.record_failed_login()
+            self.db.commit()
+            
+            # Log failed attempt
+            self._log_security_event(
+                user_id=user.id,
+                event_type="failed_login",
+                details={
+                    "ip_address": ip_address,
+                    "failed_attempts": int(user.failed_login_attempts or '0')
+                }
+            )
     
-    def _verify_2fa_code_with_secret(self, secret: str, code: str) -> bool:
-        """Verify 2FA code with provided secret."""
-        return security_manager.verify_2fa_token(secret, code)
+    def _validate_user_account_status(self, user: User) -> None:
+        """
+        Validate user account status using model properties.
+        
+        Args:
+            user: User model instance
+            
+        Raises:
+            Various authentication exceptions
+        """
+        if user.status == UserStatus.SUSPENDED:
+            raise AccountSuspendedException(
+                details={"user_id": user.id, "status": user.status}
+            )
+        
+        if not user.is_active:
+            raise AuthenticationException(
+                message="Account is inactive",
+                details={"user_id": user.id}
+            )
     
-    def _record_security_event(
+    def _is_user_account_valid(self, user: User) -> bool:
+        """
+        Check if user account is valid (non-raising version).
+        
+        Args:
+            user: User model instance
+            
+        Returns:
+            True if account is valid
+        """
+        try:
+            self._validate_user_account_status(user)
+            return True
+        except AuthenticationException:
+            return False
+    
+    def _check_login_rate_limit(self, ip_address: str) -> None:
+        """
+        Check login rate limit for IP address.
+        
+        Args:
+            ip_address: Client IP address
+            
+        Raises:
+            RateLimitExceededException: If rate limit exceeded
+        """
+        try:
+            max_attempts = getattr(settings, 'LOGIN_RATE_LIMIT_PER_MINUTE', 10)
+            security_manager.check_rate_limit(
+                identifier=f"login:{ip_address}",
+                max_requests=max_attempts,
+                window_minutes=1
+            )
+        except RateLimitExceededException:
+            self.logger.warning(f"Login rate limit exceeded for IP: {ip_address}")
+            raise
+    
+    def _calculate_password_expiry_days(self, user: User) -> Optional[int]:
+        """
+        Calculate days until password expires.
+        
+        Args:
+            user: User model instance
+            
+        Returns:
+            Days until expiry or None if no expiry
+        """
+        if not user.password_changed_at:
+            return None
+        
+        expiry_days = getattr(settings, 'FORCE_PASSWORD_CHANGE_DAYS', 0)
+        if expiry_days <= 0:
+            return None
+        
+        expiry_date = user.password_changed_at + timedelta(days=expiry_days)
+        days_remaining = (expiry_date - datetime.utcnow()).days
+        
+        return max(0, days_remaining)
+    
+    def _log_security_event(
         self,
-        user_id: Optional[int],
-        ip_address: str,
-        user_agent: Optional[str],
+        user_id: int,
         event_type: str,
         details: Dict[str, Any]
     ) -> None:
-        """Record security event for monitoring."""
-        try:
-            security_event = SecurityEvent(
-                event_type=event_type,
-                user_id=user_id,
-                ip_address=ip_address,
-                user_agent=user_agent,
-                details=details,
-                timestamp=datetime.utcnow(),
-                severity=self._get_event_severity(event_type)
-            )
-            
-            # In production, store in database or send to monitoring system
-            self.logger.info(f"Security event: {event_type} for user {user_id} from {ip_address}")
-            
-        except Exception as e:
-            self.logger.error(f"Failed to record security event: {str(e)}")
-    
-    def _get_event_severity(self, event_type: str) -> str:
-        """Get severity level for security event."""
-        high_severity_events = [
-            "multiple_failed_logins", "account_locked", "2fa_disabled",
-            "password_reset_invalid_email", "failed_login_locked_account"
-        ]
-        
-        medium_severity_events = [
-            "failed_login_attempt", "failed_2fa_verification", "password_changed"
-        ]
-        
-        if event_type in high_severity_events:
-            return "high"
-        elif event_type in medium_severity_events:
-            return "medium"
-        else:
-            return "low"
-    
-    # ==================== UTILITY METHODS ====================
-    
-    def get_user_sessions(self, user_id: int) -> List[Dict[str, Any]]:
         """
-        Get active sessions for user.
+        Log security event for audit trail.
         
         Args:
             user_id: User ID
-            
-        Returns:
-            List[Dict[str, Any]]: Active sessions
+            event_type: Type of security event
+            details: Event details
         """
-        try:
-            # Get sessions from session manager
-            sessions = []
-            with security_manager.session_manager._lock:
-                user_session_ids = security_manager.session_manager._user_sessions.get(user_id, set())
-                
-                for session_id in user_session_ids:
-                    session_data = security_manager.session_manager._active_sessions.get(session_id)
-                    if session_data and session_data["is_active"]:
-                        sessions.append({
-                            "session_id": session_id,
-                            "ip_address": session_data["ip_address"],
-                            "user_agent": session_data.get("user_agent"),
-                            "created_at": session_data["created_at"],
-                            "last_activity": session_data["last_activity"]
-                        })
-            
-            return sessions
-            
-        except Exception as e:
-            self.logger.error(f"Error getting user sessions: {str(e)}")
-            return []
-    
-    def cleanup_expired_sessions(self) -> Dict[str, int]:
-        """
-        Cleanup expired sessions and tokens.
+        self.logger.info(
+            f"Security event - User: {user_id}, Event: {event_type}, Details: {details}"
+        )
         
-        Returns:
-            Dict[str, int]: Cleanup statistics
+        # TODO: Implement audit log table for persistent security events
+        # This could be enhanced to store in database audit log
+    
+    def _handle_2fa_required(
+        self,
+        user: User,
+        login_data: LoginRequest,
+        client_info: Dict[str, Any]
+    ) -> Login2FARequiredResponse:
         """
-        try:
-            # Cleanup expired sessions
-            expired_sessions = security_manager.session_manager.cleanup_expired_sessions()
+        Handle 2FA requirement during login.
+        
+        Args:
+            user: User model instance
+            login_data: Login request
+            client_info: Client information
             
-            # Cleanup blacklisted tokens
-            security_manager.token_blacklist.cleanup_expired()
-            
-            # Cleanup expired account locks
-            unlocked_accounts = self.user_repo.unlock_expired_accounts()
-            
-            # Cleanup expired role assignments
-            expired_roles = self.user_repo.cleanup_expired_role_assignments()
-            
-            stats = {
-                "expired_sessions": expired_sessions,
-                "unlocked_accounts": unlocked_accounts,
-                "expired_role_assignments": expired_roles,
-                "cleanup_timestamp": datetime.utcnow().isoformat()
-            }
-            
-            self.logger.info(f"Security cleanup completed: {stats}")
-            return stats
-            
-        except Exception as e:
-            self.logger.error(f"Error during security cleanup: {str(e)}")
-            return {"error": str(e)}
+        Returns:
+            2FA required response
+        """
+        # Create temporary token for 2FA completion
+        temp_token_data = {
+            "sub": str(user.id),
+            "temp": True,
+            "purpose": "2fa_completion"
+        }
+        temp_token = create_access_token(
+            temp_token_data,
+            expires_delta=timedelta(minutes=5)  # Short-lived temp token
+        )
+        
+        return Login2FARequiredResponse(
+            message="Two-factor authentication required",
+            temp_token=temp_token,
+            backup_codes_available=getattr(user, 'backup_codes_count', 0)
+        )
+    
+    def _update_password_history(self, user: User, new_password_hash: str) -> None:
+        """
+        Update password history for user.
+        
+        Args:
+            user: User model instance
+            new_password_hash: New password hash to add to history
+        """
+        # TODO: Implement password history table
+        # This would prevent password reuse
+        pass
